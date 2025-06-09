@@ -215,4 +215,6 @@ if uploaded_file:
                     "Download PDF Report", pdf_stream, "report.pdf", "application/pdf"
                 )
             else:
-                st.warning("N
+                st.warning("No results returned by the AI. Please check your input and try again.")
+        else:
+            st.warning("No results returned by the AI. Please check your input and try again.")

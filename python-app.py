@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import fitz  # PyMuPDF
 import re
 import random
 import io
@@ -12,6 +11,7 @@ from docx import Document
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
+from pdfminer.high_level import extract_text as pdf_extract_text
 
 # --- Title ---
 st.title("Qualitative Data Analysis Tool with AI Integration")
@@ -52,8 +52,11 @@ def extract_text(file) -> str:
             return "\n".join([paragraph.text for paragraph in doc.paragraphs])
         elif file.name.endswith(".pdf"):
             file.seek(0)
-            doc = fitz.open(stream=file.read(), filetype="pdf")
-            return "".join([page.get_text() for page in doc])
+            # Save to a temporary file for pdfminer
+            temp_path = f"/tmp/{random.randint(1,1e9)}.pdf"
+            with open(temp_path, "wb") as f:
+                f.write(file.read())
+            return pdf_extract_text(temp_path)
     except Exception as e:
         st.error(f"Failed to extract text: {str(e)}")
         return ""

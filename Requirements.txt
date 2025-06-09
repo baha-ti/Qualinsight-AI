@@ -5,3 +5,5 @@ PyMuPDF
 openai
 python-docx
 reportlab
+pip install docx2txt
+docx2txt

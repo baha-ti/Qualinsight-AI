@@ -1,7 +1,7 @@
-streamlit
-pandas
-docx2txt
-PyMuPDF
-openai
-python-docx
-reportlab
+streamlit==1.32.0
+pandas==2.2.1
+docx2txt==0.9
+PyMuPDF==1.26.0
+openai==1.76.2
+python-docx==0.8.11
+reportlab==4.4.1

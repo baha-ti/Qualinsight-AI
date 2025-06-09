@@ -6,27 +6,39 @@ import io
 import openai
 import json
 from io import BytesIO
-from typing import List
+from typing import List, Optional
 from docx import Document
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from pdfminer.high_level import extract_text as pdf_extract_text
+import tempfile
+
+# Constants
+VALID_TRANSCRIPT_TYPES = ["txt", "docx", "pdf"]
+VALID_FRAMEWORK_TYPES = ["json", "txt"]
+OPENAI_MODEL = "gpt-4"
+MAX_TOKENS = 1500
+TEMPERATURE = 0.5
 
 # --- Title ---
-st.title("Qualitative Data Analysis Tool with AI Integration")
+st.title("QualInsight AI - Qualitative Research Assistant")
 st.markdown("Upload your transcript, frameworks, and let the AI generate codes, themes, highlights, and reports.")
 
 # --- Sidebar for API Key ---
+st.sidebar.header("Configuration")
 openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password")
-if openai_api_key:
-    openai.api_key = openai_api_key
-else:
+
+def validate_api_key(api_key: str) -> bool:
+    """Validate OpenAI API key format."""
+    return api_key.startswith("sk-") if api_key else False
+
+if not openai_api_key:
     st.sidebar.warning("Enter your OpenAI API Key to enable AI integration.")
 
 # --- Upload section ---
-uploaded_file = st.file_uploader("Upload transcript (.txt, .docx, or .pdf)", type=["txt", "docx", "pdf"])
-framework_file = st.file_uploader("Upload framework for deductive coding (.json or .txt)", type=["json", "txt"])
+uploaded_file = st.file_uploader("Upload transcript (.txt, .docx, or .pdf)", type=VALID_TRANSCRIPT_TYPES)
+framework_file = st.file_uploader("Upload framework for deductive coding (.json or .txt)", type=VALID_FRAMEWORK_TYPES)
 
 # --- Research question input ---
 research_questions = st.text_area("Enter your research question(s)", height=100)
@@ -35,78 +47,89 @@ research_questions = st.text_area("Enter your research question(s)", height=100)
 analysis_mode = st.selectbox("Choose coding mode", ["Inductive", "Deductive", "Hybrid"])
 
 # --- Extract text ---
+def extract_text_from_txt(file) -> str:
+    """Extract text from a TXT file with fallback encoding."""
+    try:
+        return file.read().decode("utf-8")
+    except UnicodeDecodeError:
+        file.seek(0)
+        return file.read().decode("latin-1")
+
+def extract_text_from_docx(file) -> str:
+    """Extract text from a DOCX file."""
+    doc = Document(file)
+    return "\n".join([paragraph.text for paragraph in doc.paragraphs])
+
+def extract_text_from_pdf(file) -> str:
+    """Extract text from a PDF file using temporary file."""
+    with tempfile.NamedTemporaryFile(delete=True, suffix=".pdf") as temp_file:
+        temp_file.write(file.read())
+        temp_file.seek(0)
+        return pdf_extract_text(temp_file.name)
+
 def extract_text(file) -> str:
+    """Extract text from various file types."""
     if not file:
         return ""
+    
     try:
         file.seek(0)
-        if file.name.endswith(".txt"):
-            try:
-                return file.read().decode("utf-8")
-            except UnicodeDecodeError:
-                file.seek(0)
-                return file.read().decode("latin-1")
-        elif file.name.endswith(".docx"):
-            # Use python-docx to extract text
-            doc = Document(file)
-            return "\n".join([paragraph.text for paragraph in doc.paragraphs])
-        elif file.name.endswith(".pdf"):
-            file.seek(0)
-            # Save to a temporary file for pdfminer
-            temp_path = f"/tmp/{random.randint(1,1e9)}.pdf"
-            with open(temp_path, "wb") as f:
-                f.write(file.read())
-            return pdf_extract_text(temp_path)
+        file_extension = file.name.split(".")[-1].lower()
+        
+        if file_extension == "txt":
+            return extract_text_from_txt(file)
+        elif file_extension == "docx":
+            return extract_text_from_docx(file)
+        elif file_extension == "pdf":
+            return extract_text_from_pdf(file)
+        else:
+            st.error(f"Unsupported file type: {file_extension}")
+            return ""
     except Exception as e:
         st.error(f"Failed to extract text: {str(e)}")
         return ""
-    return ""
 
 # --- AI-based code generator ---
-def ai_generate_codes(text: str, mode: str, rq: str, framework: str = None) -> List[dict]:
+def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = None, api_key: Optional[str] = None) -> List[dict]:
+    """Generate codes using OpenAI API."""
+    if not validate_api_key(api_key):
+        st.error("Invalid OpenAI API Key. Please enter a valid key.")
+        return []
+
     system_msg = (
         "You are a qualitative research assistant trained in thematic analysis. "
-        "Apply the following mode: " + mode + "."
+        f"Apply the following mode: {mode}."
     )
     if framework:
-        system_msg += " Use this framework for deductive coding: " + framework
-    prompt = (
-        system_msg +
-        f"\nResearch Questions:\n{rq}\n\nTranscript:\n" + text +
-        "\n\nPlease output a JSON array of objects with fields: Text, Code, Theme. "
-        "Generate codes and themes."
-    )
+        system_msg += f" Use this framework for deductive coding: {framework}"
+
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4",
+            model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": f"Research Questions:\n{rq}\n\nFramework:\n{framework or 'None'}\n\nTranscript:\n{text}"}
             ],
-            temperature=0.5,
-            max_tokens=1500
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+            api_key=api_key
         )
+        
         content = response.choices[0].message.content.strip()
+        data = json.loads(content)
+        
+        if not isinstance(data, list):
+            st.error("AI output is not a list. Check your prompt and input.")
+            return []
+            
+        return data
+        
+    except json.JSONDecodeError:
+        st.error("Failed to parse AI response. Check API output format.\n\nRaw output:\n" + content)
+        return []
     except Exception as e:
         st.error(f"OpenAI API error: {e}")
         return []
-    # Try to extract JSON from the response
-    try:
-        json_start = content.find('[')
-        json_end = content.rfind(']')
-        if json_start != -1 and json_end != -1:
-            json_str = content[json_start:json_end+1]
-            data = json.loads(json_str)
-        else:
-            data = json.loads(content)
-    except Exception:
-        st.error("Failed to parse AI response. Check API output format.\n\nRaw output:\n" + content)
-        return []
-    # Validate parsed data
-    if not isinstance(data, list):
-        st.error("AI output is not a list. Check your prompt and input.")
-        return []
-    return data
 
 # --- Process file and framework ---
 if uploaded_file:
@@ -135,7 +158,7 @@ if uploaded_file:
                 st.error("Provide OpenAI API Key in sidebar to proceed.")
             else:
                 with st.spinner("Analyzing with AI..."):
-                    results = ai_generate_codes(transcript_text, analysis_mode, research_questions, framework_text)
+                    results = ai_generate_codes(transcript_text, analysis_mode, research_questions, framework_text, openai_api_key)
                 if results:
                     # Validate for required keys
                     filtered = []

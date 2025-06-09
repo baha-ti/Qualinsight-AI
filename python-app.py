@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import docx2txt
 import fitz  # PyMuPDF
 import re
 import random
@@ -48,11 +47,9 @@ def extract_text(file) -> str:
                 file.seek(0)
                 return file.read().decode("latin-1")
         elif file.name.endswith(".docx"):
-            # Save to a temp path for docx2txt
-            temp_path = f"/tmp/{random.randint(1,1e9)}.docx"
-            with open(temp_path, "wb") as f:
-                f.write(file.read())
-            return docx2txt.process(temp_path)
+            # Use python-docx to extract text
+            doc = Document(file)
+            return "\n".join([paragraph.text for paragraph in doc.paragraphs])
         elif file.name.endswith(".pdf"):
             file.seek(0)
             doc = fitz.open(stream=file.read(), filetype="pdf")

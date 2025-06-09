@@ -3,11 +3,4 @@ pandas==1.5.3
 openai==0.27.8
 python-docx==0.8.11
 reportlab==3.6.0
-lxml==4.9.0
-python-dateutil>=2.8.2
-pytz>=2020.1
 pdfminer.six==20221105
-requests==2.31.0
-tiktoken==0.4.0
-aiohttp==3.8.5
-typing-extensions==4.7.1

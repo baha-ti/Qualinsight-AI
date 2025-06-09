@@ -1,6 +1,6 @@
 streamlit==1.24.0
 pandas==1.5.3
-openai==1.12.0
+openai==0.28.1
 python-docx==0.8.11
 reportlab==3.6.0
 lxml==4.9.0
@@ -9,3 +9,4 @@ pytz>=2020.1
 pdfminer.six==20221105
 requests>=2.31.0
 tiktoken>=0.5.2
+aiohttp>=3.8.0

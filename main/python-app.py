@@ -16,15 +16,49 @@ from pdfminer.high_level import extract_text as pdf_extract_text
 import tempfile
 import time
 import openai
+import requests
+import os
 
 # Constants
 VALID_TRANSCRIPT_TYPES = [".txt", ".docx", ".pdf"]
 VALID_FRAMEWORK_TYPES = ["json", "txt"]
-OPENAI_MODEL = "deepseek-ai/deepseek-coder-33b-instruct"
+API_URL = 'https://openrouter.ai/api/v1/chat/completions'
+MODEL = "deepseek/deepseek-chat:free"
 MAX_TOKENS = 1000
 TEMPERATURE = 0.5
 CHUNK_SIZE = 4000
 OVERLAP = 200
+
+# Get API key from secrets
+API_KEY = st.secrets["OPENROUTER_API_KEY"]
+
+# Define the headers for the API request
+headers = {
+    'Authorization': f'Bearer {API_KEY}',
+    'Content-Type': 'application/json',
+    'HTTP-Referer': 'https://github.com/baha-ti/Qualinsight-AI',
+    'X-Title': 'Qualinsight AI'
+}
+
+def get_ai_response(messages):
+    """Get response from DeepSeek API"""
+    data = {
+        "model": MODEL,
+        "messages": messages,
+        "max_tokens": MAX_TOKENS,
+        "temperature": TEMPERATURE
+    }
+    
+    try:
+        response = requests.post(API_URL, json=data, headers=headers)
+        if response.status_code == 200:
+            return response.json()['choices'][0]['message']['content']
+        else:
+            st.error(f"API Error: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        st.error(f"Error calling API: {str(e)}")
+        return None
 
 # --- Title ---
 st.title("QualInsight AI - Qualitative Research Assistant")
@@ -138,27 +172,24 @@ def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = 
     for i, chunk in enumerate(chunks):
         try:
             with st.spinner(f"Processing chunk {i+1} of {len(chunks)}..."):
-                response = client.chat.completions.create(
-                    model="deepseek-ai/deepseek-coder-33b-instruct",
-                    messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": (
-                            f"Research Questions:\n{rq}\n\n"
-                            f"Framework:\n{framework or 'None'}\n\n"
-                            f"Transcript Chunk {i+1}/{len(chunks)}:\n{chunk}"
-                        )}
-                    ],
-                    temperature=TEMPERATURE,
-                    max_tokens=MAX_TOKENS
-                )
-                content = response.choices[0].message.content.strip()
-                data = json.loads(content)
-                if isinstance(data, list):
-                    all_results.extend(data)
-                else:
-                    st.warning(f"Chunk {i+1} output is not a list. Skipping.")
+                messages = [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": (
+                        f"Research Questions:\n{rq}\n\n"
+                        f"Framework:\n{framework or 'None'}\n\n"
+                        f"Transcript Chunk {i+1}/{len(chunks)}:\n{chunk}"
+                    )}
+                ]
+                
+                response = get_ai_response(messages)
+                if response:
+                    data = json.loads(response)
+                    if isinstance(data, list):
+                        all_results.extend(data)
+                    else:
+                        st.warning(f"Chunk {i+1} output is not a list. Skipping.")
         except json.JSONDecodeError:
-            st.error(f"Failed to parse AI response for chunk {i+1}.\nRaw output:\n{content}")
+            st.error(f"Failed to parse AI response for chunk {i+1}.\nRaw output:\n{response}")
         except Exception as e:
             if "rate_limit_exceeded" in str(e):
                 st.warning("Rate limit exceeded. Waiting 60 seconds before retrying...")

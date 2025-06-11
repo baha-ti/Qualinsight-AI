@@ -1,6 +1,6 @@
 streamlit
 pandas
-openai>=1.14.0
+openai>=1.0.0
 python-docx
 reportlab
 pdfminer.six

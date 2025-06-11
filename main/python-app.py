@@ -15,6 +15,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from pdfminer.high_level import extract_text as pdf_extract_text
 import tempfile
 import time
+import openai
 
 # Constants
 VALID_TRANSCRIPT_TYPES = ["txt", "docx", "pdf"]

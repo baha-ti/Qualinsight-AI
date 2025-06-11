@@ -7,7 +7,7 @@ import io
 from openai import OpenAI
 import json
 from io import BytesIO
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from docx import Document
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, Paragraph, Spacer
@@ -24,8 +24,8 @@ VALID_TRANSCRIPT_TYPES = [".txt", ".docx", ".pdf"]
 VALID_FRAMEWORK_TYPES = ["json", "txt"]
 API_URL = 'https://openrouter.ai/api/v1/chat/completions'
 MODEL = "deepseek/deepseek-chat:free"
-MAX_TOKENS = 1000
-TEMPERATURE = 0.5
+MAX_TOKENS = 4000
+TEMPERATURE = 0.7
 CHUNK_SIZE = 4000
 OVERLAP = 200
 
@@ -60,9 +60,196 @@ def get_ai_response(messages):
         st.error(f"Error calling API: {str(e)}")
         return None
 
+# Initialize session state
+if 'knowledge_base' not in st.session_state:
+    st.session_state.knowledge_base = {}
+
+# Knowledge Base File Operations
+def load_knowledge_base() -> Dict[str, Dict[str, Any]]:
+    """Load knowledge base from JSON file"""
+    if os.path.exists('knowledge_base.json'):
+        with open('knowledge_base.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_knowledge_base(kb: Dict[str, Dict[str, Any]]):
+    """Save knowledge base to JSON file"""
+    with open('knowledge_base.json', 'w', encoding='utf-8') as f:
+        json.dump(kb, f, ensure_ascii=False, indent=2)
+
+# Load knowledge base at startup
+st.session_state.knowledge_base = load_knowledge_base()
+
 # --- Title ---
 st.title("QualInsight AI - Qualitative Research Assistant")
-st.markdown("Upload your transcript, frameworks, and let the AI generate codes, themes, highlights, and reports.")
+
+# --- Input section ---
+st.subheader("Input Transcript")
+input_method = st.radio("Choose input method:", ["Upload File", "Paste Text"])
+
+transcript_text = None
+
+if input_method == "Upload File":
+    uploaded_file = st.file_uploader("Upload transcript (.txt, .docx, or .pdf)", type=VALID_TRANSCRIPT_TYPES)
+    if uploaded_file is not None:
+        transcript_text = process_transcript(uploaded_file)
+else:
+    pasted_text = st.text_area("Paste your transcript here:", height=300)
+    if pasted_text:
+        transcript_text = [pasted_text]  # Wrap in list to match file upload format
+
+# --- Analysis Settings ---
+st.subheader("Analysis Settings")
+analysis_mode = st.radio("Choose analysis approach:", ["Inductive", "Deductive"])
+
+# Knowledge Base Management
+st.subheader("Knowledge Base Management")
+kb_action = st.radio("Knowledge Base Action:", ["Use Existing", "Add New", "Edit Existing", "Delete"])
+
+if kb_action == "Add New":
+    with st.form("new_framework_form"):
+        kb_name = st.text_input("Enter name for this framework/theory:")
+        st.subheader("Framework Structure")
+        overview = st.text_area("Overview/Description:", height=100)
+        key_concepts = st.text_area("Key Concepts (one per line):", height=100)
+        methodology = st.text_area("Methodology/Approach:", height=100)
+        applications = st.text_area("Applications/Use Cases:", height=100)
+        references = st.text_area("References:", height=100)
+        
+        if st.form_submit_button("Save to Knowledge Base"):
+            if kb_name and overview:
+                framework_data = {
+                    "overview": overview,
+                    "key_concepts": key_concepts,
+                    "methodology": methodology,
+                    "applications": applications,
+                    "references": references,
+                    "last_modified": time.strftime("%Y-%m-%d %H:%M:%S")
+                }
+                st.session_state.knowledge_base[kb_name] = framework_data
+                save_knowledge_base(st.session_state.knowledge_base)
+                st.success(f"Saved '{kb_name}' to knowledge base!")
+
+elif kb_action == "Edit Existing":
+    if st.session_state.knowledge_base:
+        selected_kb = st.selectbox("Select Framework/Theory to Edit:", list(st.session_state.knowledge_base.keys()))
+        framework_data = st.session_state.knowledge_base[selected_kb]
+        
+        with st.form("edit_framework_form"):
+            new_name = st.text_input("Framework/Theory Name:", value=selected_kb)
+            overview = st.text_area("Overview/Description:", value=framework_data.get("overview", ""), height=100)
+            key_concepts = st.text_area("Key Concepts:", value=framework_data.get("key_concepts", ""), height=100)
+            methodology = st.text_area("Methodology/Approach:", value=framework_data.get("methodology", ""), height=100)
+            applications = st.text_area("Applications/Use Cases:", value=framework_data.get("applications", ""), height=100)
+            references = st.text_area("References:", value=framework_data.get("references", ""), height=100)
+            
+            if st.form_submit_button("Update Framework"):
+                if new_name:
+                    # Remove old entry if name changed
+                    if new_name != selected_kb:
+                        del st.session_state.knowledge_base[selected_kb]
+                    
+                    framework_data = {
+                        "overview": overview,
+                        "key_concepts": key_concepts,
+                        "methodology": methodology,
+                        "applications": applications,
+                        "references": references,
+                        "last_modified": time.strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    st.session_state.knowledge_base[new_name] = framework_data
+                    save_knowledge_base(st.session_state.knowledge_base)
+                    st.success(f"Updated '{new_name}' in knowledge base!")
+
+elif kb_action == "Delete":
+    if st.session_state.knowledge_base:
+        selected_kb = st.selectbox("Select Framework/Theory to Delete:", list(st.session_state.knowledge_base.keys()))
+        if st.button("Delete Framework"):
+            del st.session_state.knowledge_base[selected_kb]
+            save_knowledge_base(st.session_state.knowledge_base)
+            st.success(f"Deleted '{selected_kb}' from knowledge base!")
+
+# Only show framework/theory selection for deductive analysis
+if analysis_mode == "Deductive":
+    if kb_action == "Use Existing":
+        if st.session_state.knowledge_base:
+            selected_kb = st.selectbox("Select Framework/Theory:", list(st.session_state.knowledge_base.keys()))
+            framework_data = st.session_state.knowledge_base[selected_kb]
+            
+            # Display framework details
+            st.subheader("Selected Framework Details")
+            st.write("**Overview:**")
+            st.write(framework_data.get("overview", ""))
+            st.write("**Key Concepts:**")
+            st.write(framework_data.get("key_concepts", ""))
+            st.write("**Methodology:**")
+            st.write(framework_data.get("methodology", ""))
+            
+            # Format framework text for analysis
+            framework_text = f"""
+            Framework: {selected_kb}
+            Overview: {framework_data.get('overview', '')}
+            Key Concepts: {framework_data.get('key_concepts', '')}
+            Methodology: {framework_data.get('methodology', '')}
+            Applications: {framework_data.get('applications', '')}
+            """
+        else:
+            st.warning("No frameworks/theories in knowledge base. Please add one first.")
+            framework_text = ""
+    else:
+        framework_text = ""
+else:
+    framework_text = ""
+
+if transcript_text:
+    # Process the chunks
+    all_results = []
+    for i, chunk in enumerate(transcript_text):
+        try:
+            with st.spinner(f"Processing chunk {i+1} of {len(transcript_text)}..."):
+                system_prompt = "You are an AI assistant analyzing interview transcripts. "
+                if analysis_mode == "Deductive":
+                    system_prompt += f"""
+                    Use the following framework/theory to guide your analysis:
+                    {framework_text}
+                    
+                    Please structure your analysis as follows:
+                    1. Key Themes Identified
+                    2. Evidence from Transcript
+                    3. Framework Application
+                    4. Insights and Implications
+                    """
+                else:
+                    system_prompt += """
+                    Provide an inductive analysis, identifying emerging themes and patterns without preconceived categories.
+                    Please structure your analysis as follows:
+                    1. Emerging Themes
+                    2. Supporting Evidence
+                    3. Patterns and Connections
+                    4. Key Insights
+                    """
+                
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Analyze this transcript chunk and provide key insights:\n\n{chunk}"}
+                ]
+                
+                response = get_ai_response(messages)
+                if response:
+                    st.write(f"Analysis for chunk {i+1}:")
+                    st.write(response)
+                    st.write("---")
+                    all_results.append(response)
+        except Exception as e:
+            st.error(f"Error processing chunk {i+1}: {str(e)}")
+    
+    if all_results:
+        st.success("Analysis complete!")
+        st.write("### Complete Analysis")
+        for i, result in enumerate(all_results):
+            st.write(f"**Chunk {i+1} Analysis:**")
+            st.write(result)
+            st.write("---")
 
 # --- Sidebar for API Key ---
 # Use the API key from Streamlit secrets
@@ -87,9 +274,6 @@ framework_file = st.file_uploader("Upload framework for deductive coding (.json 
 
 # --- Research question input ---
 research_questions = st.text_area("Enter your research question(s)", height=100)
-
-# --- Analysis mode ---
-analysis_mode = st.selectbox("Choose coding mode", ["Inductive", "Deductive", "Hybrid"])
 
 # --- Extract text functions ---
 def extract_text_from_txt(file) -> str:
@@ -183,21 +367,12 @@ def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = 
                 
                 response = get_ai_response(messages)
                 if response:
-                    data = json.loads(response)
-                    if isinstance(data, list):
-                        all_results.extend(data)
-                    else:
-                        st.warning(f"Chunk {i+1} output is not a list. Skipping.")
-        except json.JSONDecodeError:
-            st.error(f"Failed to parse AI response for chunk {i+1}.\nRaw output:\n{response}")
+                    st.write(f"Analysis for chunk {i+1}:")
+                    st.write(response)
+                    st.write("---")
+                    all_results.append(response)
         except Exception as e:
-            if "rate_limit_exceeded" in str(e):
-                st.warning("Rate limit exceeded. Waiting 60 seconds before retrying...")
-                time.sleep(60)  # Wait for 60 seconds
-                continue
-            else:
-                st.error(f"OpenAI API error: {e}")
-                break
+            st.error(f"Error processing chunk {i+1}: {str(e)}")
     
     return all_results
 
@@ -228,67 +403,12 @@ if uploaded_file:
             with st.spinner("Analyzing with AI..."):
                 results = ai_generate_codes(transcript_text, analysis_mode, research_questions, framework_text)
             if results:
-                # Filter valid records
-                filtered = [r for r in results if all(k in r for k in ("Text","Code","Theme"))]
-                if not filtered:
-                    st.warning("AI did not return expected fields.")
-                df = pd.DataFrame(filtered)
-                st.subheader("Coded Segments")
-                st.dataframe(df)
-
-                # Highlight transcript
-                st.subheader("Highlighted Transcript")
-                highlights = transcript_text
-                used = set()
-                for row in filtered:
-                    txt = row['Text']
-                    tag = f"🔹[{row['Code']}]"
-                    if txt and txt not in used:
-                        highlights = highlights.replace(txt, f"{tag} {txt}", 1)
-                        used.add(txt)
-                st.text_area("Highlights", highlights, height=300)
-
-                # CSV download
-                csv = df.to_csv(index=False)
-                st.download_button(
-                    "Download Code Table as CSV", csv, "coded_segments.csv", "text/csv"
-                )
-
-                # Word report
-                doc = Document()
-                doc.add_heading('Qualitative Analysis Report', 0)
-                doc.add_paragraph('Research Questions: ' + research_questions)
-                doc.add_heading('Codes and Themes', level=1)
-                table = doc.add_table(rows=1, cols=3)
-                hdr = table.rows[0].cells
-                hdr[0].text, hdr[1].text, hdr[2].text = 'Text','Code','Theme'
-                for _, r in df.iterrows():
-                    row_cells = table.add_row().cells
-                    row_cells[0].text = str(r['Text'])
-                    row_cells[1].text = str(r['Code'])
-                    row_cells[2].text = str(r['Theme'])
-                doc_stream = BytesIO()
-                doc.save(doc_stream)
-                doc_stream.seek(0)
-                st.download_button(
-                    "Download Word Report", doc_stream,
-                    "report.docx",
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                )
-
-                # PDF report
-                pdf_stream = BytesIO()
-                pdf = SimpleDocTemplate(pdf_stream, pagesize=letter)
-                styles = getSampleStyleSheet()
-                elems = [Paragraph('Qualitative Analysis Report', styles['Title']),
-                         Paragraph('Research Questions: ' + research_questions, styles['Normal']), Spacer(1,12)]
-                table_data = [['Text','Code','Theme']] + df.values.tolist()
-                elems.append(Table(table_data))
-                pdf.build(elems)
-                pdf_stream.seek(0)
-                st.download_button(
-                    "Download PDF Report", pdf_stream, "report.pdf", "application/pdf"
-                )
+                st.success("Analysis complete!")
+                st.write("### Complete Analysis")
+                for i, result in enumerate(results):
+                    st.write(f"**Chunk {i+1} Analysis:**")
+                    st.write(result)
+                    st.write("---")
             else:
                 st.warning("No results returned by the AI. Please check your input and try again.")
         else:

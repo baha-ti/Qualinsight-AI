@@ -18,12 +18,13 @@ import time
 import openai
 
 # Constants
-VALID_TRANSCRIPT_TYPES = ["txt", "docx", "pdf"]
+VALID_TRANSCRIPT_TYPES = [".txt", ".docx", ".pdf"]
 VALID_FRAMEWORK_TYPES = ["json", "txt"]
-OPENAI_MODEL = "gpt-4"
+OPENAI_MODEL = "deepseek/deepseek-coder-33b-instruct"
 MAX_TOKENS = 1000
 TEMPERATURE = 0.5
-CHUNK_SIZE = 3000
+CHUNK_SIZE = 4000
+OVERLAP = 200
 
 # --- Title ---
 st.title("QualInsight AI - Qualitative Research Assistant")

@@ -85,36 +85,36 @@ st.title("QualInsight AI - Qualitative Research Assistant")
 
 # --- Input section ---
 st.subheader("Input Transcript")
-input_method = st.radio("Choose input method:", ["Upload File", "Paste Text"])
+input_method = st.radio("Choose input method:", ["Upload File", "Paste Text"], key="input_method_radio")
 
 transcript_text = None
 
 if input_method == "Upload File":
-    uploaded_file = st.file_uploader("Upload transcript (.txt, .docx, or .pdf)", type=VALID_TRANSCRIPT_TYPES)
+    uploaded_file = st.file_uploader("Upload transcript (.txt, .docx, or .pdf)", type=VALID_TRANSCRIPT_TYPES, key="transcript_uploader")
     if uploaded_file is not None:
         transcript_text = process_transcript(uploaded_file)
 else:
-    pasted_text = st.text_area("Paste your transcript here:", height=300)
+    pasted_text = st.text_area("Paste your transcript here:", height=300, key="transcript_text_area")
     if pasted_text:
-        transcript_text = [pasted_text]  # Wrap in list to match file upload format
+        transcript_text = [pasted_text]
 
 # --- Analysis Settings ---
 st.subheader("Analysis Settings")
-analysis_mode = st.radio("Choose analysis approach:", ["Inductive", "Deductive"])
+analysis_mode = st.radio("Choose analysis approach:", ["Inductive", "Deductive"], key="analysis_mode_radio")
 
 # Knowledge Base Management
 st.subheader("Knowledge Base Management")
-kb_action = st.radio("Knowledge Base Action:", ["Use Existing", "Add New", "Edit Existing", "Delete"])
+kb_action = st.radio("Knowledge Base Action:", ["Use Existing", "Add New", "Edit Existing", "Delete"], key="kb_action_radio")
 
 if kb_action == "Add New":
     with st.form("new_framework_form"):
-        kb_name = st.text_input("Enter name for this framework/theory:")
+        kb_name = st.text_input("Enter name for this framework/theory:", key="new_kb_name")
         st.subheader("Framework Structure")
-        overview = st.text_area("Overview/Description:", height=100)
-        key_concepts = st.text_area("Key Concepts (one per line):", height=100)
-        methodology = st.text_area("Methodology/Approach:", height=100)
-        applications = st.text_area("Applications/Use Cases:", height=100)
-        references = st.text_area("References:", height=100)
+        overview = st.text_area("Overview/Description:", height=100, key="new_overview")
+        key_concepts = st.text_area("Key Concepts (one per line):", height=100, key="new_key_concepts")
+        methodology = st.text_area("Methodology/Approach:", height=100, key="new_methodology")
+        applications = st.text_area("Applications/Use Cases:", height=100, key="new_applications")
+        references = st.text_area("References:", height=100, key="new_references")
         
         if st.form_submit_button("Save to Knowledge Base"):
             if kb_name and overview:
@@ -132,16 +132,16 @@ if kb_action == "Add New":
 
 elif kb_action == "Edit Existing":
     if st.session_state.knowledge_base:
-        selected_kb = st.selectbox("Select Framework/Theory to Edit:", list(st.session_state.knowledge_base.keys()))
+        selected_kb = st.selectbox("Select Framework/Theory to Edit:", list(st.session_state.knowledge_base.keys()), key="edit_kb_select")
         framework_data = st.session_state.knowledge_base[selected_kb]
         
         with st.form("edit_framework_form"):
-            new_name = st.text_input("Framework/Theory Name:", value=selected_kb)
-            overview = st.text_area("Overview/Description:", value=framework_data.get("overview", ""), height=100)
-            key_concepts = st.text_area("Key Concepts:", value=framework_data.get("key_concepts", ""), height=100)
-            methodology = st.text_area("Methodology/Approach:", value=framework_data.get("methodology", ""), height=100)
-            applications = st.text_area("Applications/Use Cases:", value=framework_data.get("applications", ""), height=100)
-            references = st.text_area("References:", value=framework_data.get("references", ""), height=100)
+            new_name = st.text_input("Framework/Theory Name:", value=selected_kb, key="edit_kb_name")
+            overview = st.text_area("Overview/Description:", value=framework_data.get("overview", ""), height=100, key="edit_overview")
+            key_concepts = st.text_area("Key Concepts:", value=framework_data.get("key_concepts", ""), height=100, key="edit_key_concepts")
+            methodology = st.text_area("Methodology/Approach:", value=framework_data.get("methodology", ""), height=100, key="edit_methodology")
+            applications = st.text_area("Applications/Use Cases:", value=framework_data.get("applications", ""), height=100, key="edit_applications")
+            references = st.text_area("References:", value=framework_data.get("references", ""), height=100, key="edit_references")
             
             if st.form_submit_button("Update Framework"):
                 if new_name:
@@ -163,8 +163,8 @@ elif kb_action == "Edit Existing":
 
 elif kb_action == "Delete":
     if st.session_state.knowledge_base:
-        selected_kb = st.selectbox("Select Framework/Theory to Delete:", list(st.session_state.knowledge_base.keys()))
-        if st.button("Delete Framework"):
+        selected_kb = st.selectbox("Select Framework/Theory to Delete:", list(st.session_state.knowledge_base.keys()), key="delete_kb_select")
+        if st.button("Delete Framework", key="delete_kb_button"):
             del st.session_state.knowledge_base[selected_kb]
             save_knowledge_base(st.session_state.knowledge_base)
             st.success(f"Deleted '{selected_kb}' from knowledge base!")
@@ -173,7 +173,7 @@ elif kb_action == "Delete":
 if analysis_mode == "Deductive":
     if kb_action == "Use Existing":
         if st.session_state.knowledge_base:
-            selected_kb = st.selectbox("Select Framework/Theory:", list(st.session_state.knowledge_base.keys()))
+            selected_kb = st.selectbox("Select Framework/Theory:", list(st.session_state.knowledge_base.keys()), key="use_kb_select")
             framework_data = st.session_state.knowledge_base[selected_kb]
             
             # Display framework details

@@ -1,3 +1,4 @@
+import sys
 import streamlit as st
 import pandas as pd
 import re
@@ -28,6 +29,8 @@ st.markdown("Upload your transcript, frameworks, and let the AI generate codes, 
 # --- Sidebar for API Key ---
 st.sidebar.header("Configuration")
 openai_key = st.sidebar.text_input("OpenAI API Key", type="password")
+
+st.sidebar.info(f"Python executable: {sys.executable}")
 
 if openai_key and openai_key.startswith("sk-"):
     openai.api_key = openai_key

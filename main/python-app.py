@@ -30,23 +30,23 @@ st.title("QualInsight AI - Qualitative Research Assistant")
 st.markdown("Upload your transcript, frameworks, and let the AI generate codes, themes, highlights, and reports.")
 
 # --- Sidebar for API Key ---
-# api_key = st.sidebar.text_input("API Key")
-# openai.api_key = api_key
-
 # Use the API key from Streamlit secrets
-openai.api_key = st.secrets["OPENAI_API_KEY"]
+openai.api_key = st.secrets["OPENROUTER_API_KEY"]
+openai.base_url = "https://openrouter.ai/api/v1"
+
+# Initialize OpenAI client with OpenRouter configuration
+client = OpenAI(
+    api_key=st.secrets["OPENROUTER_API_KEY"],
+    base_url="https://openrouter.ai/api/v1"
+)
+
+# Add headers for OpenRouter
+client.default_headers = {
+    "HTTP-Referer": "https://github.com/baha-ti/Qualinsight-AI",  # Your app's URL
+    "X-Title": "Qualinsight AI"  # Your app's name
+}
 
 st.sidebar.info(f"Python executable: {sys.executable}")
-
-# Initialize OpenAI client
-client = None
-if openai.api_key and openai.api_key.startswith("sk-"):
-    client = OpenAI(api_key=openai.api_key)
-else:
-    if openai.api_key:
-        st.sidebar.warning("Invalid key format. Make sure it starts with 'sk-'.")
-    else:
-        st.sidebar.info("Enter your OpenAI API Key to enable AI integration.")
 
 # --- Upload section ---
 uploaded_file = st.file_uploader("Upload transcript (.txt, .docx, or .pdf)", type=VALID_TRANSCRIPT_TYPES)
@@ -140,7 +140,7 @@ def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = 
         try:
             with st.spinner(f"Processing chunk {i+1} of {len(chunks)}..."):
                 response = client.chat.completions.create(
-                    model=OPENAI_MODEL,
+                    model="deepseek-ai/deepseek-coder-33b-instruct",
                     messages=[
                         {"role": "system", "content": system_msg},
                         {"role": "user", "content": (

@@ -67,14 +67,16 @@ if 'knowledge_base' not in st.session_state:
 # Knowledge Base File Operations
 def load_knowledge_base() -> Dict[str, Dict[str, Any]]:
     """Load knowledge base from JSON file"""
-    if os.path.exists('knowledge_base.json'):
-        with open('knowledge_base.json', 'r', encoding='utf-8') as f:
+    kb_path = os.path.join(os.path.dirname(__file__), 'knowledge_base.json')
+    if os.path.exists(kb_path):
+        with open(kb_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {}
 
 def save_knowledge_base(kb: Dict[str, Dict[str, Any]]):
     """Save knowledge base to JSON file"""
-    with open('knowledge_base.json', 'w', encoding='utf-8') as f:
+    kb_path = os.path.join(os.path.dirname(__file__), 'knowledge_base.json')
+    with open(kb_path, 'w', encoding='utf-8') as f:
         json.dump(kb, f, ensure_ascii=False, indent=2)
 
 # Load knowledge base at startup
@@ -176,32 +178,18 @@ elif kb_action == "Delete":
 
 # Only show framework/theory selection for deductive analysis
 if analysis_mode == "Deductive":
-    if kb_action == "Use Existing":
-        if st.session_state.knowledge_base:
-            selected_kb = st.selectbox("Select Framework/Theory:", list(st.session_state.knowledge_base.keys()), key="use_kb_select")
-            framework_data = st.session_state.knowledge_base[selected_kb]
-            
-            # Display framework details
-            st.subheader("Selected Framework Details")
-            st.write("**Overview:**")
-            st.write(framework_data.get("overview", ""))
-            st.write("**Key Concepts:**")
-            st.write(framework_data.get("key_concepts", ""))
-            st.write("**Methodology:**")
-            st.write(framework_data.get("methodology", ""))
-            
-            # Format framework text for analysis
-            framework_text = f"""
-            Framework: {selected_kb}
-            Overview: {framework_data.get('overview', '')}
-            Key Concepts: {framework_data.get('key_concepts', '')}
-            Methodology: {framework_data.get('methodology', '')}
-            Applications: {framework_data.get('applications', '')}
-            """
-        else:
-            st.warning("No frameworks/theories in knowledge base. Please add one first.")
-            framework_text = ""
+    if st.session_state.knowledge_base:
+        selected_kb = st.selectbox("Select Framework/Theory:", list(st.session_state.knowledge_base.keys()), key="use_kb_select")
+        framework_data = st.session_state.knowledge_base[selected_kb]
+        framework_text = f"""
+        Framework: {selected_kb}
+        Overview: {framework_data.get('overview', '')}
+        Key Concepts: {framework_data.get('key_concepts', '')}
+        Methodology: {framework_data.get('methodology', '')}
+        Applications: {framework_data.get('applications', '')}
+        """
     else:
+        st.warning("No frameworks/theories in knowledge base. Please add one first.")
         framework_text = ""
 else:
     framework_text = ""

@@ -83,8 +83,9 @@ st.session_state.knowledge_base = load_knowledge_base()
 # --- Title ---
 st.title("QualInsight AI - Qualitative Research Assistant")
 
-# --- Input section ---
-st.subheader("Input Transcript")
+# --- Step 1: Input Section ---
+st.header("Step 1: Input")
+st.subheader("Upload Transcript")
 input_method = st.radio("Choose input method:", ["Upload File", "Paste Text"], key="input_method_radio")
 
 transcript_text = None
@@ -98,7 +99,11 @@ else:
     if pasted_text:
         transcript_text = [pasted_text]
 
-# --- Analysis Settings ---
+# Research Questions
+st.subheader("Research Questions")
+research_questions = st.text_area("Enter your research question(s):", height=100, key="research_questions")
+
+# Analysis Settings
 st.subheader("Analysis Settings")
 analysis_mode = st.radio("Choose analysis approach:", ["Inductive", "Deductive"], key="analysis_mode_radio")
 
@@ -201,55 +206,142 @@ if analysis_mode == "Deductive":
 else:
     framework_text = ""
 
-if transcript_text:
-    # Process the chunks
-    all_results = []
-    for i, chunk in enumerate(transcript_text):
-        try:
-            with st.spinner(f"Processing chunk {i+1} of {len(transcript_text)}..."):
-                system_prompt = "You are an AI assistant analyzing interview transcripts. "
-                if analysis_mode == "Deductive":
-                    system_prompt += f"""
-                    Use the following framework/theory to guide your analysis:
-                    {framework_text}
+# --- Step 2: Processing ---
+if transcript_text and research_questions:
+    if st.button("Start Analysis", key="start_analysis"):
+        st.header("Step 2: Analysis Results")
+        
+        # Process the chunks
+        all_results = []
+        for i, chunk in enumerate(transcript_text):
+            try:
+                with st.spinner(f"Processing chunk {i+1} of {len(transcript_text)}..."):
+                    system_prompt = """You are an AI assistant analyzing interview transcripts. 
+                    For each segment of text, identify:
+                    1. Code (specific category)
+                    2. Subtheme (subcategory)
+                    3. Theme (main category)
+                    4. The exact text segment that supports this coding
                     
-                    Please structure your analysis as follows:
-                    1. Key Themes Identified
-                    2. Evidence from Transcript
-                    3. Framework Application
-                    4. Insights and Implications
+                    Format your response as a JSON array of objects with these fields:
+                    {
+                        "text": "exact quote from transcript",
+                        "code": "specific category",
+                        "subtheme": "subcategory",
+                        "theme": "main category"
+                    }
                     """
-                else:
-                    system_prompt += """
-                    Provide an inductive analysis, identifying emerging themes and patterns without preconceived categories.
-                    Please structure your analysis as follows:
-                    1. Emerging Themes
-                    2. Supporting Evidence
-                    3. Patterns and Connections
-                    4. Key Insights
-                    """
-                
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Analyze this transcript chunk and provide key insights:\n\n{chunk}"}
-                ]
-                
-                response = get_ai_response(messages)
-                if response:
-                    st.write(f"Analysis for chunk {i+1}:")
-                    st.write(response)
-                    st.write("---")
-                    all_results.append(response)
-        except Exception as e:
-            st.error(f"Error processing chunk {i+1}: {str(e)}")
-    
-    if all_results:
-        st.success("Analysis complete!")
-        st.write("### Complete Analysis")
-        for i, result in enumerate(all_results):
-            st.write(f"**Chunk {i+1} Analysis:**")
-            st.write(result)
-            st.write("---")
+                    
+                    if analysis_mode == "Deductive":
+                        system_prompt += f"\nUse this framework to guide your analysis:\n{framework_text}"
+                    else:
+                        system_prompt += "\nProvide an inductive analysis, identifying emerging themes and patterns."
+                    
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Research Questions: {research_questions}\n\nAnalyze this transcript chunk:\n\n{chunk}"}
+                    ]
+                    
+                    response = get_ai_response(messages)
+                    if response:
+                        try:
+                            # Parse the JSON response
+                            codes = json.loads(response)
+                            all_results.extend(codes)
+                        except json.JSONDecodeError:
+                            st.error(f"Failed to parse AI response for chunk {i+1}")
+                            continue
+            except Exception as e:
+                st.error(f"Error processing chunk {i+1}: {str(e)}")
+        
+        if all_results:
+            # --- Step 3: Output Display ---
+            st.header("Step 3: Analysis Output")
+            
+            # Create DataFrame
+            df = pd.DataFrame(all_results)
+            
+            # Display the coding table
+            st.subheader("Coding Table")
+            st.dataframe(df)
+            
+            # Create highlighted transcript
+            st.subheader("Highlighted Transcript")
+            highlighted_text = transcript_text[0]  # Assuming single transcript
+            for _, row in df.iterrows():
+                text = row['text']
+                code = row['code']
+                theme = row['theme']
+                highlight = f"🔹[{code} → {theme}]"
+                highlighted_text = highlighted_text.replace(text, f"{highlight} {text}", 1)
+            
+            st.text_area("Highlighted Transcript", highlighted_text, height=400)
+            
+            # --- Step 4: Export Options ---
+            st.header("Step 4: Export Options")
+            
+            # Export as CSV
+            csv = df.to_csv(index=False)
+            st.download_button(
+                "Download Coding Table (CSV)",
+                csv,
+                "coding_table.csv",
+                "text/csv",
+                key="download_csv"
+            )
+            
+            # Export as Word
+            doc = Document()
+            doc.add_heading('Qualitative Analysis Report', 0)
+            doc.add_paragraph('Research Questions: ' + research_questions)
+            doc.add_heading('Coding Table', level=1)
+            table = doc.add_table(rows=1, cols=4)
+            hdr = table.rows[0].cells
+            hdr[0].text, hdr[1].text, hdr[2].text, hdr[3].text = 'Text', 'Code', 'Subtheme', 'Theme'
+            for _, row in df.iterrows():
+                row_cells = table.add_row().cells
+                row_cells[0].text = str(row['text'])
+                row_cells[1].text = str(row['code'])
+                row_cells[2].text = str(row['subtheme'])
+                row_cells[3].text = str(row['theme'])
+            
+            doc.add_heading('Highlighted Transcript', level=1)
+            doc.add_paragraph(highlighted_text)
+            
+            doc_stream = BytesIO()
+            doc.save(doc_stream)
+            doc_stream.seek(0)
+            st.download_button(
+                "Download Full Report (Word)",
+                doc_stream,
+                "analysis_report.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key="download_word"
+            )
+            
+            # Export as PDF
+            pdf_stream = BytesIO()
+            pdf = SimpleDocTemplate(pdf_stream, pagesize=letter)
+            styles = getSampleStyleSheet()
+            elems = [
+                Paragraph('Qualitative Analysis Report', styles['Title']),
+                Paragraph('Research Questions: ' + research_questions, styles['Normal']),
+                Spacer(1, 12),
+                Paragraph('Coding Table', styles['Heading1']),
+                Table([['Text', 'Code', 'Subtheme', 'Theme']] + df.values.tolist()),
+                Spacer(1, 12),
+                Paragraph('Highlighted Transcript', styles['Heading1']),
+                Paragraph(highlighted_text, styles['Normal'])
+            ]
+            pdf.build(elems)
+            pdf_stream.seek(0)
+            st.download_button(
+                "Download Full Report (PDF)",
+                pdf_stream,
+                "analysis_report.pdf",
+                "application/pdf",
+                key="download_pdf"
+            )
 
 # --- Sidebar for API Key ---
 # Use the API key from Streamlit secrets
@@ -271,9 +363,6 @@ st.sidebar.info(f"Python executable: {sys.executable}")
 # --- Upload section ---
 uploaded_file = st.file_uploader("Upload transcript (.txt, .docx, or .pdf)", type=VALID_TRANSCRIPT_TYPES)
 framework_file = st.file_uploader("Upload framework for deductive coding (.json or .txt)", type=VALID_FRAMEWORK_TYPES)
-
-# --- Research question input ---
-research_questions = st.text_area("Enter your research question(s)", height=100)
 
 # --- Extract text functions ---
 def extract_text_from_txt(file) -> str:

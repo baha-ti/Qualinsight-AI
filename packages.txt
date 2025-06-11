@@ -22,5 +22,4 @@ python3-dateutil
 python3-numpy
 python3-pandas
 python3-pillow
-python3-reportlab
-python3-pdfminer.six 
+python3-reportlab 

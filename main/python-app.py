@@ -37,14 +37,12 @@ openai.base_url = "https://openrouter.ai/api/v1"
 # Initialize OpenAI client with OpenRouter configuration
 client = OpenAI(
     api_key=st.secrets["OPENROUTER_API_KEY"],
-    base_url="https://openrouter.ai/api/v1"
+    base_url="https://openrouter.ai/api/v1",
+    default_headers={
+        "HTTP-Referer": "https://github.com/baha-ti/Qualinsight-AI",  # Your app's URL
+        "X-Title": "Qualinsight AI"  # Your app's name
+    }
 )
-
-# Add headers for OpenRouter
-client.default_headers = {
-    "HTTP-Referer": "https://github.com/baha-ti/Qualinsight-AI",  # Your app's URL
-    "X-Title": "Qualinsight AI"  # Your app's name
-}
 
 st.sidebar.info(f"Python executable: {sys.executable}")
 

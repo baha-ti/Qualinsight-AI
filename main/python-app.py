@@ -214,13 +214,29 @@ if transcript_text and research_questions:
                     2. Breaking down the text into meaningful segments
                     3. Assigning initial codes to each segment
                     
-                    Format your response as a JSON array of objects with these fields:
+                    IMPORTANT: Your response MUST be a valid JSON array. Each object in the array must have these exact fields:
                     {
                         "respondent": "name or identifier of the speaker",
                         "text": "exact quote from transcript",
                         "code": "initial code for this segment",
                         "notes": "any additional observations"
                     }
+                    
+                    Example response format:
+                    [
+                        {
+                            "respondent": "Participant 1",
+                            "text": "I found the exercise challenging",
+                            "code": "Difficulty Level",
+                            "notes": "Mentioned challenge with specific task"
+                        },
+                        {
+                            "respondent": "Participant 2",
+                            "text": "The instructions were clear",
+                            "code": "Clarity",
+                            "notes": "Positive feedback on instructions"
+                        }
+                    ]
                     """
                     
                     messages = [
@@ -231,13 +247,50 @@ if transcript_text and research_questions:
                     response = get_ai_response(messages)
                     if response:
                         try:
+                            # Clean the response to ensure it's valid JSON
+                            response = response.strip()
+                            if not response.startswith('['):
+                                response = '[' + response
+                            if not response.endswith(']'):
+                                response = response + ']'
+                            
                             # Parse the JSON response
                             initial_codes = json.loads(response)
+                            
+                            # Validate the structure
+                            if not isinstance(initial_codes, list):
+                                raise ValueError("Response is not a list")
+                            
+                            for code in initial_codes:
+                                required_fields = ['respondent', 'text', 'code', 'notes']
+                                if not all(field in code for field in required_fields):
+                                    raise ValueError(f"Missing required fields in response: {code}")
+                            
                             all_results.extend(initial_codes)
+                            
                         except json.JSONDecodeError as e:
                             st.error(f"Failed to parse AI response for chunk {i+1}. Error: {str(e)}")
                             st.text("Raw response:")
                             st.text(response)
+                            st.text("\nAttempting to fix JSON format...")
+                            
+                            # Try to fix common JSON formatting issues
+                            try:
+                                # Remove any markdown code block markers
+                                response = response.replace('```json', '').replace('```', '')
+                                # Remove any leading/trailing whitespace
+                                response = response.strip()
+                                # Ensure it's a valid JSON array
+                                if not response.startswith('['):
+                                    response = '[' + response
+                                if not response.endswith(']'):
+                                    response = response + ']'
+                                
+                                initial_codes = json.loads(response)
+                                all_results.extend(initial_codes)
+                                st.success("Successfully fixed and parsed the response!")
+                            except Exception as fix_error:
+                                st.error(f"Failed to fix JSON format: {str(fix_error)}")
                             continue
             except Exception as e:
                 st.error(f"Error processing chunk {i+1}: {str(e)}")
@@ -271,7 +324,7 @@ if transcript_text and research_questions:
                         2. Identifying subthemes within each theme
                         3. Providing evidence from the transcript
                         
-                        Format your response as a JSON array of objects with these fields:
+                        IMPORTANT: Your response MUST be a valid JSON array. Each object in the array must have these exact fields:
                         {
                             "theme": "main theme",
                             "subtheme": "subtheme within the main theme",
@@ -279,6 +332,17 @@ if transcript_text and research_questions:
                             "evidence": ["list of relevant quotes"],
                             "explanation": "brief explanation of this theme"
                         }
+                        
+                        Example response format:
+                        [
+                            {
+                                "theme": "Learning Experience",
+                                "subtheme": "Instructional Clarity",
+                                "codes": ["Clear Instructions", "Understanding"],
+                                "evidence": ["The instructions were very clear", "I understood what to do"],
+                                "explanation": "Participants found the instructions clear and easy to follow"
+                            }
+                        ]
                         """
                         
                         # Convert initial coding to string for analysis
@@ -292,8 +356,24 @@ if transcript_text and research_questions:
                         response = get_ai_response(messages)
                         if response:
                             try:
+                                # Clean the response to ensure it's valid JSON
+                                response = response.strip()
+                                if not response.startswith('['):
+                                    response = '[' + response
+                                if not response.endswith(']'):
+                                    response = response + ']'
+                                
                                 # Parse the JSON response
                                 themes = json.loads(response)
+                                
+                                # Validate the structure
+                                if not isinstance(themes, list):
+                                    raise ValueError("Response is not a list")
+                                
+                                for theme in themes:
+                                    required_fields = ['theme', 'subtheme', 'codes', 'evidence', 'explanation']
+                                    if not all(field in theme for field in required_fields):
+                                        raise ValueError(f"Missing required fields in response: {theme}")
                                 
                                 # Create DataFrame for themes
                                 df_themes = pd.DataFrame(themes)
@@ -395,6 +475,24 @@ if transcript_text and research_questions:
                                 st.error(f"Failed to parse theme development response. Error: {str(e)}")
                                 st.text("Raw response:")
                                 st.text(response)
+                                st.text("\nAttempting to fix JSON format...")
+                                
+                                # Try to fix common JSON formatting issues
+                                try:
+                                    # Remove any markdown code block markers
+                                    response = response.replace('```json', '').replace('```', '')
+                                    # Remove any leading/trailing whitespace
+                                    response = response.strip()
+                                    # Ensure it's a valid JSON array
+                                    if not response.startswith('['):
+                                        response = '[' + response
+                                    if not response.endswith(']'):
+                                        response = response + ']'
+                                    
+                                    themes = json.loads(response)
+                                    st.success("Successfully fixed and parsed the response!")
+                                except Exception as fix_error:
+                                    st.error(f"Failed to fix JSON format: {str(fix_error)}")
                 except Exception as e:
                     st.error(f"Error in theme development: {str(e)}")
 

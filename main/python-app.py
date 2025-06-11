@@ -199,31 +199,29 @@ if transcript_text and research_questions:
     if st.button("Start Analysis", key="start_analysis"):
         st.header("Step 2: Analysis Results")
         
+        # Stage 1: Initial Coding
+        st.subheader("Stage 1: Initial Coding")
+        
         # Process the chunks
         all_results = []
         for i, chunk in enumerate(transcript_text):
             try:
                 with st.spinner(f"Processing chunk {i+1} of {len(transcript_text)}..."):
+                    # First stage prompt - focus on identifying codes and organizing by respondent
                     system_prompt = """You are an AI assistant analyzing interview transcripts. 
-                    For each segment of text, identify:
-                    1. Code (specific category)
-                    2. Subtheme (subcategory)
-                    3. Theme (main category)
-                    4. The exact text segment that supports this coding
+                    For this first stage, focus on:
+                    1. Identifying the respondent/speaker (if not already marked)
+                    2. Breaking down the text into meaningful segments
+                    3. Assigning initial codes to each segment
                     
                     Format your response as a JSON array of objects with these fields:
                     {
+                        "respondent": "name or identifier of the speaker",
                         "text": "exact quote from transcript",
-                        "code": "specific category",
-                        "subtheme": "subcategory",
-                        "theme": "main category"
+                        "code": "initial code for this segment",
+                        "notes": "any additional observations"
                     }
                     """
-                    
-                    if analysis_mode == "Deductive":
-                        system_prompt += f"\nUse this framework to guide your analysis:\n{framework_text}"
-                    else:
-                        system_prompt += "\nProvide an inductive analysis, identifying emerging themes and patterns."
                     
                     messages = [
                         {"role": "system", "content": system_prompt},
@@ -234,102 +232,171 @@ if transcript_text and research_questions:
                     if response:
                         try:
                             # Parse the JSON response
-                            codes = json.loads(response)
-                            all_results.extend(codes)
-                        except json.JSONDecodeError:
-                            st.error(f"Failed to parse AI response for chunk {i+1}")
+                            initial_codes = json.loads(response)
+                            all_results.extend(initial_codes)
+                        except json.JSONDecodeError as e:
+                            st.error(f"Failed to parse AI response for chunk {i+1}. Error: {str(e)}")
+                            st.text("Raw response:")
+                            st.text(response)
                             continue
             except Exception as e:
                 st.error(f"Error processing chunk {i+1}: {str(e)}")
         
         if all_results:
-            # --- Step 3: Output Display ---
-            st.header("Step 3: Analysis Output")
+            # Display Stage 1 Results
+            st.subheader("Initial Coding Results")
             
-            # Create DataFrame
-            df = pd.DataFrame(all_results)
+            # Create DataFrame for initial coding
+            df_initial = pd.DataFrame(all_results)
             
-            # Display the coding table
-            st.subheader("Coding Table")
-            st.dataframe(df)
+            # Group by respondent
+            if 'respondent' in df_initial.columns:
+                st.write("### Coding by Respondent")
+                for respondent in df_initial['respondent'].unique():
+                    st.write(f"**Respondent: {respondent}**")
+                    respondent_df = df_initial[df_initial['respondent'] == respondent]
+                    st.dataframe(respondent_df[['text', 'code', 'notes']])
+                    st.write("---")
             
-            # Create highlighted transcript
-            st.subheader("Highlighted Transcript")
-            highlighted_text = transcript_text[0]  # Assuming single transcript
-            for _, row in df.iterrows():
-                text = row['text']
-                code = row['code']
-                theme = row['theme']
-                highlight = f"🔹[{code} → {theme}]"
-                highlighted_text = highlighted_text.replace(text, f"{highlight} {text}", 1)
+            # Stage 2: Theme Development
+            st.subheader("Stage 2: Theme Development")
             
-            st.text_area("Highlighted Transcript", highlighted_text, height=400)
-            
-            # --- Step 4: Export Options ---
-            st.header("Step 4: Export Options")
-            
-            # Export as CSV
-            csv = df.to_csv(index=False)
-            st.download_button(
-                "Download Coding Table (CSV)",
-                csv,
-                "coding_table.csv",
-                "text/csv",
-                key="download_csv"
-            )
-            
-            # Export as Word
-            doc = Document()
-            doc.add_heading('Qualitative Analysis Report', 0)
-            doc.add_paragraph('Research Questions: ' + research_questions)
-            doc.add_heading('Coding Table', level=1)
-            table = doc.add_table(rows=1, cols=4)
-            hdr = table.rows[0].cells
-            hdr[0].text, hdr[1].text, hdr[2].text, hdr[3].text = 'Text', 'Code', 'Subtheme', 'Theme'
-            for _, row in df.iterrows():
-                row_cells = table.add_row().cells
-                row_cells[0].text = str(row['text'])
-                row_cells[1].text = str(row['code'])
-                row_cells[2].text = str(row['subtheme'])
-                row_cells[3].text = str(row['theme'])
-            
-            doc.add_heading('Highlighted Transcript', level=1)
-            doc.add_paragraph(highlighted_text)
-            
-            doc_stream = BytesIO()
-            doc.save(doc_stream)
-            doc_stream.seek(0)
-            st.download_button(
-                "Download Full Report (Word)",
-                doc_stream,
-                "analysis_report.docx",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                key="download_word"
-            )
-            
-            # Export as PDF
-            pdf_stream = BytesIO()
-            pdf = SimpleDocTemplate(pdf_stream, pagesize=letter)
-            styles = getSampleStyleSheet()
-            elems = [
-                Paragraph('Qualitative Analysis Report', styles['Title']),
-                Paragraph('Research Questions: ' + research_questions, styles['Normal']),
-                Spacer(1, 12),
-                Paragraph('Coding Table', styles['Heading1']),
-                Table([['Text', 'Code', 'Subtheme', 'Theme']] + df.values.tolist()),
-                Spacer(1, 12),
-                Paragraph('Highlighted Transcript', styles['Heading1']),
-                Paragraph(highlighted_text, styles['Normal'])
-            ]
-            pdf.build(elems)
-            pdf_stream.seek(0)
-            st.download_button(
-                "Download Full Report (PDF)",
-                pdf_stream,
-                "analysis_report.pdf",
-                "application/pdf",
-                key="download_pdf"
-            )
+            if st.button("Proceed to Theme Development", key="theme_development"):
+                try:
+                    with st.spinner("Developing themes and subthemes..."):
+                        # Second stage prompt - focus on theme development
+                        system_prompt = """You are an AI assistant developing themes from coded transcript segments.
+                        For this second stage, focus on:
+                        1. Grouping related codes into themes
+                        2. Identifying subthemes within each theme
+                        3. Providing evidence from the transcript
+                        
+                        Format your response as a JSON array of objects with these fields:
+                        {
+                            "theme": "main theme",
+                            "subtheme": "subtheme within the main theme",
+                            "codes": ["list of related codes"],
+                            "evidence": ["list of relevant quotes"],
+                            "explanation": "brief explanation of this theme"
+                        }
+                        """
+                        
+                        # Convert initial coding to string for analysis
+                        coding_summary = df_initial.to_json(orient='records')
+                        
+                        messages = [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"Research Questions: {research_questions}\n\nInitial Coding:\n{coding_summary}"}
+                        ]
+                        
+                        response = get_ai_response(messages)
+                        if response:
+                            try:
+                                # Parse the JSON response
+                                themes = json.loads(response)
+                                
+                                # Create DataFrame for themes
+                                df_themes = pd.DataFrame(themes)
+                                
+                                # Display Theme Analysis
+                                st.write("### Theme Analysis")
+                                st.dataframe(df_themes)
+                                
+                                # Create highlighted transcript
+                                st.subheader("Highlighted Transcript with Themes")
+                                highlighted_text = transcript_text[0]  # Assuming single transcript
+                                
+                                # Define colors for themes
+                                theme_colors = {
+                                    theme: f"🔹[{theme}]" for theme in df_themes['theme'].unique()
+                                }
+                                
+                                # Apply highlights
+                                for _, row in df_themes.iterrows():
+                                    for quote in row['evidence']:
+                                        if quote in highlighted_text:
+                                            theme = row['theme']
+                                            highlight = theme_colors[theme]
+                                            highlighted_text = highlighted_text.replace(quote, f"{highlight} {quote}", 1)
+                                
+                                st.text_area("Highlighted Transcript", highlighted_text, height=400)
+                                
+                                # Export Options
+                                st.subheader("Export Options")
+                                
+                                # Export initial coding
+                                csv_initial = df_initial.to_csv(index=False)
+                                st.download_button(
+                                    "Download Initial Coding (CSV)",
+                                    csv_initial,
+                                    "initial_coding.csv",
+                                    "text/csv",
+                                    key="download_initial_csv"
+                                )
+                                
+                                # Export theme analysis
+                                csv_themes = df_themes.to_csv(index=False)
+                                st.download_button(
+                                    "Download Theme Analysis (CSV)",
+                                    csv_themes,
+                                    "theme_analysis.csv",
+                                    "text/csv",
+                                    key="download_themes_csv"
+                                )
+                                
+                                # Export full report
+                                doc = Document()
+                                doc.add_heading('Qualitative Analysis Report', 0)
+                                doc.add_paragraph('Research Questions: ' + research_questions)
+                                
+                                # Add initial coding
+                                doc.add_heading('Initial Coding', level=1)
+                                for respondent in df_initial['respondent'].unique():
+                                    doc.add_heading(f'Respondent: {respondent}', level=2)
+                                    respondent_df = df_initial[df_initial['respondent'] == respondent]
+                                    table = doc.add_table(rows=1, cols=3)
+                                    hdr = table.rows[0].cells
+                                    hdr[0].text, hdr[1].text, hdr[2].text = 'Text', 'Code', 'Notes'
+                                    for _, row in respondent_df.iterrows():
+                                        row_cells = table.add_row().cells
+                                        row_cells[0].text = str(row['text'])
+                                        row_cells[1].text = str(row['code'])
+                                        row_cells[2].text = str(row['notes'])
+                                
+                                # Add theme analysis
+                                doc.add_heading('Theme Analysis', level=1)
+                                table = doc.add_table(rows=1, cols=5)
+                                hdr = table.rows[0].cells
+                                hdr[0].text, hdr[1].text, hdr[2].text, hdr[3].text, hdr[4].text = 'Theme', 'Subtheme', 'Codes', 'Evidence', 'Explanation'
+                                for _, row in df_themes.iterrows():
+                                    row_cells = table.add_row().cells
+                                    row_cells[0].text = str(row['theme'])
+                                    row_cells[1].text = str(row['subtheme'])
+                                    row_cells[2].text = str(row['codes'])
+                                    row_cells[3].text = str(row['evidence'])
+                                    row_cells[4].text = str(row['explanation'])
+                                
+                                # Add highlighted transcript
+                                doc.add_heading('Highlighted Transcript', level=1)
+                                doc.add_paragraph(highlighted_text)
+                                
+                                doc_stream = BytesIO()
+                                doc.save(doc_stream)
+                                doc_stream.seek(0)
+                                st.download_button(
+                                    "Download Full Report (Word)",
+                                    doc_stream,
+                                    "analysis_report.docx",
+                                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                    key="download_word"
+                                )
+                                
+                            except json.JSONDecodeError as e:
+                                st.error(f"Failed to parse theme development response. Error: {str(e)}")
+                                st.text("Raw response:")
+                                st.text(response)
+                except Exception as e:
+                    st.error(f"Error in theme development: {str(e)}")
 
 # --- Sidebar for API Key ---
 # Use the API key from Streamlit secrets

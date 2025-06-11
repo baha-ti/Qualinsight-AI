@@ -29,17 +29,20 @@ st.title("QualInsight AI - Qualitative Research Assistant")
 st.markdown("Upload your transcript, frameworks, and let the AI generate codes, themes, highlights, and reports.")
 
 # --- Sidebar for API Key ---
-st.sidebar.header("Configuration")
-openai_key = st.sidebar.text_input("OpenAI API Key", type="password")
+# api_key = st.sidebar.text_input("API Key")
+# openai.api_key = api_key
+
+# Use the API key from Streamlit secrets
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 st.sidebar.info(f"Python executable: {sys.executable}")
 
 # Initialize OpenAI client
 client = None
-if openai_key and openai_key.startswith("sk-"):
-    client = OpenAI(api_key=openai_key)
+if openai.api_key and openai.api_key.startswith("sk-"):
+    client = OpenAI(api_key=openai.api_key)
 else:
-    if openai_key:
+    if openai.api_key:
         st.sidebar.warning("Invalid key format. Make sure it starts with 'sk-'.")
     else:
         st.sidebar.info("Enter your OpenAI API Key to enable AI integration.")

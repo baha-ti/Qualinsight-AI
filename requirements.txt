@@ -1,0 +1,6 @@
+openai
+streamlit
+pandas
+python-docx
+reportlab
+pdfminer.six

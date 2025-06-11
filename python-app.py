@@ -4,7 +4,7 @@ import pandas as pd
 import re
 import random
 import io
-import openai
+from openai import OpenAI
 import json
 from io import BytesIO
 from typing import List, Optional
@@ -14,13 +14,15 @@ from reportlab.platypus import SimpleDocTemplate, Table, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from pdfminer.high_level import extract_text as pdf_extract_text
 import tempfile
+import time
 
 # Constants
 VALID_TRANSCRIPT_TYPES = ["txt", "docx", "pdf"]
 VALID_FRAMEWORK_TYPES = ["json", "txt"]
 OPENAI_MODEL = "gpt-4"
-MAX_TOKENS = 1500
+MAX_TOKENS = 1000
 TEMPERATURE = 0.5
+CHUNK_SIZE = 3000
 
 # --- Title ---
 st.title("QualInsight AI - Qualitative Research Assistant")
@@ -32,8 +34,10 @@ openai_key = st.sidebar.text_input("OpenAI API Key", type="password")
 
 st.sidebar.info(f"Python executable: {sys.executable}")
 
+# Initialize OpenAI client
+client = None
 if openai_key and openai_key.startswith("sk-"):
-    openai.api_key = openai_key
+    client = OpenAI(api_key=openai_key)
 else:
     if openai_key:
         st.sidebar.warning("Invalid key format. Make sure it starts with 'sk-'.")
@@ -90,9 +94,31 @@ def extract_text(file) -> str:
         st.error(f"Failed to extract text: {e}")
         return ""
 
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE) -> List[str]:
+    """Split text into smaller chunks."""
+    words = text.split()
+    chunks = []
+    current_chunk = []
+    current_size = 0
+    
+    for word in words:
+        word_size = len(word) + 1  # +1 for space
+        if current_size + word_size > chunk_size:
+            chunks.append(' '.join(current_chunk))
+            current_chunk = [word]
+            current_size = word_size
+        else:
+            current_chunk.append(word)
+            current_size += word_size
+    
+    if current_chunk:
+        chunks.append(' '.join(current_chunk))
+    
+    return chunks
+
 # --- AI-based code generator ---
 def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = None) -> List[dict]:
-    if not openai.api_key:
+    if not client:
         st.error("Please configure a valid OpenAI API Key in the sidebar.")
         return []
 
@@ -102,32 +128,44 @@ def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = 
     if framework:
         system_msg += f" Use this framework for deductive coding: {framework}"
 
-    try:
-        response = openai.ChatCompletion.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": (
-                    f"Research Questions:\n{rq}\n\n"
-                    f"Framework:\n{framework or 'None'}\n\n"
-                    f"Transcript:\n{text}"
-                )}
-            ],
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS
-        )
-        content = response.choices[0].message.content.strip()
-        data = json.loads(content)
-        if not isinstance(data, list):
-            st.error("AI output is not a list. Check your prompt and input.")
-            return []
-        return data
-    except json.JSONDecodeError:
-        st.error(f"Failed to parse AI response.\nRaw output:\n{content}")
-        return []
-    except Exception as e:
-        st.error(f"OpenAI API error: {e}")
-        return []
+    # Split text into chunks
+    chunks = chunk_text(text)
+    all_results = []
+    
+    for i, chunk in enumerate(chunks):
+        try:
+            with st.spinner(f"Processing chunk {i+1} of {len(chunks)}..."):
+                response = client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": (
+                            f"Research Questions:\n{rq}\n\n"
+                            f"Framework:\n{framework or 'None'}\n\n"
+                            f"Transcript Chunk {i+1}/{len(chunks)}:\n{chunk}"
+                        )}
+                    ],
+                    temperature=TEMPERATURE,
+                    max_tokens=MAX_TOKENS
+                )
+                content = response.choices[0].message.content.strip()
+                data = json.loads(content)
+                if isinstance(data, list):
+                    all_results.extend(data)
+                else:
+                    st.warning(f"Chunk {i+1} output is not a list. Skipping.")
+        except json.JSONDecodeError:
+            st.error(f"Failed to parse AI response for chunk {i+1}.\nRaw output:\n{content}")
+        except Exception as e:
+            if "rate_limit_exceeded" in str(e):
+                st.warning("Rate limit exceeded. Waiting 60 seconds before retrying...")
+                time.sleep(60)  # Wait for 60 seconds
+                continue
+            else:
+                st.error(f"OpenAI API error: {e}")
+                break
+    
+    return all_results
 
 # --- Process file and framework ---
 if uploaded_file:

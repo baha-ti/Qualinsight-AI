@@ -20,7 +20,7 @@ import openai
 # Constants
 VALID_TRANSCRIPT_TYPES = [".txt", ".docx", ".pdf"]
 VALID_FRAMEWORK_TYPES = ["json", "txt"]
-OPENAI_MODEL = "deepseek/deepseek-coder-33b-instruct"
+OPENAI_MODEL = "deepseek-ai/deepseek-coder-33b-instruct"
 MAX_TOKENS = 1000
 TEMPERATURE = 0.5
 CHUNK_SIZE = 4000

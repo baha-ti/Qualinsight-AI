@@ -357,6 +357,7 @@ with tab2:
             key="max_tokens_slider"
         )
     
+    st.write("Debug: About to render Start Analysis button.")
     # Start analysis button
     if st.button("Start Analysis", key="start_analysis"):
         st.info("Start Analysis button clicked!")

@@ -38,6 +38,13 @@ import threading
 from queue import Queue
 import uuid
 import weakref
+from PIL import Image
+import pytesseract
+import re
+from pdfminer.layout import LAParams
+
+# Configure Tesseract path for Windows
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # Streamlit page configuration - MUST BE THE FIRST STREAMLIT COMMAND
 st.set_page_config(
@@ -383,41 +390,106 @@ def count_tokens(text: str) -> int:
 
 @cache_result(ttl=CACHE_TTL)
 def extract_text_from_pdf(file) -> str:
-    """Extract text from a PDF file using multiple fallback methods."""
+    """Extract text from a PDF file using multiple fallback methods with OCR support."""
     file_content = file.read()
     
-    def try_pymupdf(file_content: bytes) -> Optional[str]:
+    def try_pymupdf(file_content: bytes, password: str = None) -> Optional[str]:
         try:
             doc = fitz.open(stream=file_content, filetype="pdf")
+            if doc.is_encrypted:
+                if password:
+                    doc.authenticate(password)
+                else:
+                    raise FileProcessingError("PDF is password protected. Please provide a password.")
+            
             text = ""
-            for page in doc:
-                text += page.get_text()
+            total_pages = len(doc)
+            
+            for i, page in enumerate(doc):
+                # Try normal text extraction first
+                page_text = page.get_text()
+                
+                # If no text found, try OCR
+                if not page_text.strip():
+                    try:
+                        pix = page.get_pixmap()
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                        page_text = pytesseract.image_to_string(img)
+                    except Exception as e:
+                        logger.warning(f"OCR failed for page {i+1}: {e}")
+                
+                text += page_text + "\n"
+                
+                # Report progress
+                progress = (i + 1) / total_pages
+                st.progress(progress, text=f"Processing page {i+1} of {total_pages}")
+            
             return text if text.strip() else None
         except Exception as e:
             logger.error(f"PyMuPDF extraction failed: {e}")
             return None
 
-    def try_pdfminer(file_content: bytes) -> Optional[str]:
+    def try_pdfminer(file_content: bytes, password: str = None) -> Optional[str]:
         try:
-            text = pdf_extract_text(BytesIO(file_content))
+            text = pdf_extract_text(
+                BytesIO(file_content),
+                password=password,
+                codec='utf-8',
+                laparams=LAParams(
+                    line_margin=0.5,
+                    word_margin=0.1,
+                    char_margin=2.0,
+                    boxes_flow=0.5,
+                    detect_vertical=True
+                )
+            )
             return text if text.strip() else None
         except Exception as e:
             logger.error(f"pdfminer.six extraction failed: {e}")
             return None
 
+    def clean_text(text: str) -> str:
+        """Clean and format extracted text."""
+        # Remove excessive whitespace
+        text = re.sub(r'\s+', ' ', text)
+        # Remove page numbers
+        text = re.sub(r'\n\s*\d+\s*\n', '\n', text)
+        # Fix common OCR errors
+        text = text.replace('|', 'I')  # Common OCR error
+        text = text.replace('l', 'I')  # Common OCR error
+        # Normalize line endings
+        text = text.replace('\r\n', '\n')
+        # Remove empty lines
+        text = '\n'.join(line for line in text.splitlines() if line.strip())
+        return text.strip()
+
+    # Check if file is password protected
+    try:
+        doc = fitz.open(stream=file_content, filetype="pdf")
+        is_encrypted = doc.is_encrypted
+        doc.close()
+    except Exception:
+        is_encrypted = False
+
+    password = None
+    if is_encrypted:
+        password = st.text_input("This PDF is password protected. Please enter the password:", type="password")
+        if not password:
+            raise FileProcessingError("Password is required for this PDF.")
+
     # Try PyMuPDF first (more robust)
-    text = try_pymupdf(file_content)
+    text = try_pymupdf(file_content, password)
     if text:
         logger.info("Text extracted using PyMuPDF.")
-        return text
+        return clean_text(text)
 
     # Fallback to pdfminer.six
-    text = try_pdfminer(file_content)
+    text = try_pdfminer(file_content, password)
     if text:
         logger.info("Text extracted using pdfminer.six.")
-        return text
+        return clean_text(text)
 
-    raise FileProcessingError("Failed to extract text from PDF using all available methods.")
+    raise FileProcessingError("Failed to extract text from PDF using all available methods. The PDF might be scanned or contain only images.")
 
 @cache_result(ttl=CACHE_TTL)
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = OVERLAP) -> List[str]:
@@ -743,25 +815,30 @@ def handle_analysis_tab():
         # Retrieve the progress queue
         progress_queue = task_manager.get_progress_queue(task_id)
         if progress_queue:
+            # Process all messages in the queue in this rerun cycle
             while not progress_queue.empty():
-                message_type, *data = progress_queue.get_nowait()
-                if message_type == "progress":
-                    progress_val, status_msg = data
-                    st.session_state[f"progress_{task_id}"] = progress_val
-                    st.session_state[f"status_{task_id}"] = status_msg
-                    progress = progress_val # Update local variable for current render cycle
-                    status = status_msg
-                elif message_type == "complete_data":
-                    analysis_results = data[0]
-                    st.session_state.analysis_results = analysis_results
-                    st.session_state.analysis_complete = True
-                    st.session_state[f"status_{task_id}"] = "Analysis complete!"
-                    analysis_complete = True # Update local variable
-                elif message_type == "error":
-                    error_msg = data[0]
-                    st.session_state[f"status_{task_id}"] = f"Error: {error_msg}"
-                    st.session_state.analysis_complete = True
-                    analysis_complete = True # Update local variable
+                try:
+                    message_type, *data = progress_queue.get_nowait()
+                    if message_type == "progress":
+                        progress_val, status_msg = data
+                        st.session_state[f"progress_{task_id}"] = progress_val
+                        st.session_state[f"status_{task_id}"] = status_msg
+                        progress = progress_val # Update local variable for current render cycle
+                        status = status_msg
+                    elif message_type == "complete_data":
+                        analysis_results = data[0]
+                        st.session_state.analysis_results = analysis_results
+                        st.session_state.analysis_complete = True
+                        st.session_state[f"status_{task_id}"] = "Analysis complete!"
+                        analysis_complete = True # Update local variable
+                    elif message_type == "error":
+                        error_msg = data[0]
+                        st.session_state[f"status_{task_id}"] = f"Error: {error_msg}"
+                        st.session_state.analysis_complete = True
+                        analysis_complete = True # Update local variable
+                except Exception as e:
+                    logger.error(f"Error processing queue message for task {task_id}: {e}")
+                    # Don't re-raise, allow the app to continue
 
         logger.info(f"Monitoring task {task_id}. Progress: {progress:.1%}, Status: {status}, Complete: {analysis_complete}")
 
@@ -773,7 +850,7 @@ def handle_analysis_tab():
             status_text.text(status)
 
             if analysis_complete:
-                logger.info(f"Task {task_id} detected as complete in UI. Results: {st.session_state.get("analysis_results") is not None}")
+                logger.info(f"Task {task_id} detected as complete in UI. Results: {st.session_state.get('analysis_results') is not None}")
                 progress_bar.empty() # Clear progress bar
                 status_text.empty() # Clear status text
                 
@@ -795,367 +872,455 @@ def handle_analysis_tab():
                 logger.info(f"Task {task_id} UI elements cleaned up.")
 
             else:
-                # Rerun the app to update progress until analysis is complete
+                # Only rerun if not complete
                 logger.info(f"Task {task_id} not yet complete. Forcing rerun.")
                 time.sleep(0.1) # Small delay to prevent excessive reruns
                 st.rerun()
 
 @handle_errors
 def handle_results_tab():
-    """Handle the results tab with error handling."""
-    if not st.session_state.analysis_complete:
-        st.warning("Please complete the analysis first.")
-        return
-        
+    """Handle the results tab content."""
     st.header("Analysis Results")
     
-    # Create tabs for different views
-    tab1, tab2, tab3 = st.tabs(["Coded Transcript", "Theme Analysis", "Statistics"])
-    
-    with tab1:
-        st.subheader("Coded Transcript")
-        if not st.session_state.analysis_results.get("coded_segments"):
-            st.warning("No coded segments found in the analysis results.")
-            return
-            
-        for segment in st.session_state.analysis_results["coded_segments"]:
-            display_coded_segment(segment)
-    
-    with tab2:
-        st.subheader("Theme Analysis")
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            # Theme distribution chart
-            themes = [seg.get("theme") for seg in st.session_state.analysis_results.get("coded_segments", [])]
-            if not themes:
-                st.warning("No themes found in the analysis results.")
-                return
-                
-            st.plotly_chart(create_theme_distribution_chart(themes), use_container_width=True)
+    if "analysis_results" not in st.session_state or not st.session_state.analysis_results:
+        st.info("No analysis results available. Please run an analysis first.")
+        return
+
+    analysis_results = st.session_state.analysis_results
+
+    if not isinstance(analysis_results, dict) or "themes" not in analysis_results or "coded_segments" not in analysis_results:
+        st.error("Invalid analysis results format.")
+        return
+
+    themes = analysis_results.get("themes", [])
+    coded_segments = analysis_results.get("coded_segments", [])
+
+    if not themes and not coded_segments:
+        st.info("Analysis completed, but no themes or coded segments were identified.")
+        return
+
+    # Display themes
+    st.subheader("Identified Themes")
+    if themes:
+        for i, theme in enumerate(themes):
+            st.markdown(f"**{i+1}. {theme}**")
+    else:
+        st.info("No themes identified.")
+
+    # Display coded segments
+    st.subheader("Coded Segments")
+    if coded_segments:
+        # Filter and display by theme if selected
+        all_themes = sorted(list(set(s.get("theme", "No Theme") for s in coded_segments)))
+        selected_theme = st.selectbox("Filter by Theme", ["All Themes"] + all_themes)
+
+        if selected_theme == "All Themes":
+            segments_to_display = coded_segments
+        else:
+            segments_to_display = [s for s in coded_segments if s.get("theme") == selected_theme]
         
-        with col2:
-            # Theme list with counts
-            theme_counts = pd.Series(themes).value_counts()
-            st.markdown("### Theme Frequency")
-            for theme, count in theme_counts.items():
-                st.markdown(f"- **{theme}**: {count} segments")
-    
-    with tab3:
-        st.subheader("Analysis Statistics")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Total Segments", len(st.session_state.analysis_results.get("coded_segments", [])))
-            st.metric("Unique Themes", len(set(themes)))
-        with col2:
-            st.metric("Analysis Time", f"{st.session_state.analysis_results.get('analysis_time', 0):.2f} seconds")
+        if segments_to_display:
+            for segment in segments_to_display:
+                display_coded_segment(segment)
+        else:
+            st.info("No coded segments for the selected theme.")
+    else:
+        st.info("No coded segments available.")
+
+    # Show Theme Distribution Chart
+    if themes and coded_segments:
+        st.subheader("Theme Distribution")
+        segment_themes = [s.get("theme", "No Theme") for s in coded_segments]
+        if segment_themes:
+            fig = create_theme_distribution_chart(segment_themes)
+            st.plotly_chart(fig, use_container_width=True)
+
+def display_analysis_results(analysis_results: Dict):
+    """Helper function to display analysis results from handle_analysis_tab."""
+    st.subheader("Analysis Summary")
+    st.write(analysis_results.get("summary", "No summary provided."))
+
+    themes = analysis_results.get("themes", [])
+    coded_segments = analysis_results.get("coded_segments", [])
+
+    if themes:
+        st.subheader("Identified Themes")
+        st.markdown("-" + "\n-".join(themes))
+
+    if coded_segments:
+        st.subheader("First 5 Coded Segments (for quick review)")
+        for segment in coded_segments[:5]: # Show first 5 for brevity
+            display_coded_segment(segment)
+        if len(coded_segments) > 5:
+            st.info(f"See the 'Results' tab for all {len(coded_segments)} coded segments.")
 
 @handle_errors
 def handle_export_tab():
-    """Handle the export tab with error handling."""
-    if not st.session_state.analysis_complete:
-        st.warning("Please complete the analysis first.")
+    """Handle the export tab content."""
+    st.header("Export Analysis Results")
+
+    if "analysis_results" not in st.session_state or not st.session_state.analysis_results:
+        st.info("No analysis results available to export. Please run an analysis first.")
         return
-        
-    st.header("Export Results")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Export Options")
-        export_format = st.selectbox(
-            "Format",
-            ["PDF", "DOCX", "CSV"],
-            help="Choose the export format"
-        )
-        
-        if st.button("Export", type="primary"):
-            with st.spinner("Preparing export..."):
-                try:
-                    # Export logic here
-                    st.success("Export completed!")
-                except Exception as e:
-                    raise FileProcessingError(
-                        "Failed to export results",
-                        f"Error: {str(e)}\nTraceback: {traceback.format_exc()}"
-                    )
-    
-    with col2:
-        st.subheader("Preview")
-        st.markdown("### Export Preview")
-        # Preview logic here
+
+    analysis_results = st.session_state.analysis_results
+    coded_segments = analysis_results.get("coded_segments", [])
+
+    if not coded_segments:
+        st.warning("No coded segments to export.")
+        return
+
+    df_segments = pd.DataFrame(coded_segments)
+
+    st.subheader("Export Coded Segments")
+
+    # CSV Export
+    csv_data = df_segments.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="Download Coded Segments as CSV",
+        data=csv_data,
+        file_name="coded_segments.csv",
+        mime="text/csv",
+    )
+
+    # PDF Export
+    if st.button("Download Coded Segments as PDF"):
+        try:
+            pdf_buffer = BytesIO()
+            doc = SimpleDocTemplate(pdf_buffer, pagesize=letter)
+            styles = getSampleStyleSheet()
+            
+            flowables = []
+            flowables.append(Paragraph("Qualinsight AI - Coded Segments Report", styles['h1']))
+            flowables.append(Spacer(1, 0.2 * inch))
+
+            # Add summary if available
+            summary = analysis_results.get("summary")
+            if summary:
+                flowables.append(Paragraph("Analysis Summary:", styles['h2']))
+                flowables.append(Paragraph(summary, styles['Normal']))
+                flowables.append(Spacer(1, 0.2 * inch))
+            
+            flowables.append(Paragraph("Coded Segments:", styles['h2']))
+
+            data = [["Theme", "Code", "Segment Text", "Notes"]]
+            for _, row in df_segments.iterrows():
+                data.append([row['theme'], row['code'], row['text'], row['notes']])
+
+            # Create table with styles for better readability
+            table_style = [
+                ('BACKGROUND', (0,0), (-1,0), colors.grey),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0,0), (-1,0), 12),
+                ('BACKGROUND', (0,1), (-1,-1), colors.beige),
+                ('GRID', (0,0), (-1,-1), 1, colors.black)
+            ]
+            table = Table(data, colWidths=[1.5*inch, 1.5*inch, 3*inch, 1.5*inch])
+            table.setStyle(TableStyle(table_style))
+            flowables.append(table)
+            
+            doc.build(flowables)
+            pdf_buffer.seek(0)
+            st.download_button(
+                label="Click to Download PDF",
+                data=pdf_buffer.getvalue(),
+                file_name="coded_segments.pdf",
+                mime="application/pdf",
+            )
+            st.success("PDF generated successfully!")
+        except Exception as e:
+            st.error(f"Error generating PDF: {e}")
+            st.exception(e)
 
 def merge_coded_chunks(chunks: List[Dict]) -> List[Dict]:
-    """Merge coded chunks while handling overlapping segments."""
-    merged = []
-    seen_texts = set()
+    """Merges overlapping or adjacent coded chunks into larger segments if they share the same theme and code."""
+    if not chunks:
+        return []
+
+    # Sort chunks by their original position/index if available, or by text for consistency
+    # Assuming chunks might have an 'original_index' or are processed in order
+    # For simplicity, if not, we'll sort by text content or a placeholder
+    # In a real app, you'd track original segment IDs/ranges for robust merging
+    sorted_chunks = sorted(chunks, key=lambda x: x.get("text", "")) # Simple sort for now
+
+    merged_segments = []
+    current_segment = None
+
+    for chunk in sorted_chunks:
+        if current_segment is None:
+            current_segment = {
+                "text": chunk.get("text", ""),
+                "code": chunk.get("code", ""),
+                "theme": chunk.get("theme", ""),
+                "notes": chunk.get("notes", ""),
+                "original_chunks": [chunk] # Keep track of original chunks
+            }
+        else:
+            # Check for same theme and code, and if chunks are 'adjacent' (conceptual adjacency here)
+            # A more sophisticated check would involve original text offsets
+            if (chunk.get("theme") == current_segment["theme"] and
+                chunk.get("code") == current_segment["code"]):
+                
+                # Simple merge: concatenate text and notes
+                current_segment["text"] += " " + chunk.get("text", "")
+                if chunk.get("notes") and chunk.get("notes") not in current_segment["notes"]:
+                    current_segment["notes"] += "; " + chunk.get("notes", "")
+                current_segment["original_chunks"].append(chunk)
+            else:
+                merged_segments.append(current_segment)
+                current_segment = {
+                    "text": chunk.get("text", ""),
+                    "code": chunk.get("code", ""),
+                    "theme": chunk.get("theme", ""),
+                    "notes": chunk.get("notes", ""),
+                    "original_chunks": [chunk]
+                }
     
-    for chunk in chunks:
-        for entry in chunk:
-            # Skip if we've seen this exact text before
-            if entry['text'] in seen_texts:
-                continue
-            
-            # Check for overlapping segments
-            is_overlap = False
-            for existing in merged:
-                if entry['text'] in existing['text'] or existing['text'] in entry['text']:
-                    # Keep the longer segment
-                    if len(entry['text']) > len(existing['text']):
-                        merged.remove(existing)
-                        merged.append(entry)
-                    is_overlap = True
-                    break
-            
-            if not is_overlap:
-                merged.append(entry)
-                seen_texts.add(entry['text'])
-    
-    return merged
+    if current_segment:
+        merged_segments.append(current_segment)
+
+    # Optionally, you might want to clean up merged_segments to remove original_chunks
+    for segment in merged_segments:
+        if "original_chunks" in segment:
+            del segment["original_chunks"]
+
+    return merged_segments
 
 def calculate_intercoder_reliability(coders_data: List[pd.DataFrame]) -> Dict[str, float]:
-    """Calculate Cohen's Kappa and Fleiss' Kappa for multiple coders."""
+    """Calculate inter-coder reliability (Cohen's Kappa) for pairs of coders."""
     if len(coders_data) < 2:
-        return {"error": "Need at least 2 coders for reliability analysis"}
-    
-    # Get unique segments across all coders
-    all_segments = sorted(list(set(segment for coder_df in coders_data for segment in coder_df['segment'])))
-    
-    # Create a DataFrame for all segments and coders' codes
-    segment_codes = {segment: [] for segment in all_segments}
-    for coder_df in coders_data:
-        for segment in all_segments:
-            # Find the code for the current segment from the current coder
-            code = coder_df[coder_df['segment'] == segment]['code'].iloc[0] if segment in coder_df['segment'].values else None
-            segment_codes[segment].append(code)
-            
+        return {"error": "At least two coder dataframes are required for inter-coder reliability calculation.", "kappa_scores": {}}
+
     kappa_scores = {}
-    for i, j in combinations(range(len(coders_data)), 2):
-        coder1_codes = [codes[i] if i < len(codes) else None for codes in segment_codes.values()]
-        coder2_codes = [codes[j] if j < len(codes) else None for codes in segment_codes.values()]
-        
-        # Filter out None values
-        valid_pairs = [(c1, c2) for c1, c2 in zip(coder1_codes, coder2_codes) if c1 is not None and c2 is not None]
-        if valid_pairs:
-            c1_codes, c2_codes = zip(*valid_pairs)
-            kappa = cohen_kappa_score(c1_codes, c2_codes)
-            kappa_scores[f"Coders {i+1}-{j+1}"] = kappa
+
+    # Extract all unique segments across all coders (simplified: using text as identifier)
+    all_segments_text = set()
+    for df in coders_data:
+        all_segments_text.update(df['text'].unique())
     
-    return kappa_scores
+    # Create a unified DataFrame for comparison
+    # This is a simplified approach. A robust solution needs careful handling of segment boundaries and overlaps.
+    unified_data = pd.DataFrame(list(all_segments_text), columns=['text'])
+
+    for i, j in combinations(range(len(coders_data)), 2):
+        coder1_name = f"Coder_{i+1}"
+        coder2_name = f"Coder_{j+1}"
+
+        df1 = coders_data[i].set_index('text')
+        df2 = coders_data[j].set_index('text')
+
+        # Merge their codings
+        merged_df = unified_data.merge(df1[['theme']], left_on='text', right_index=True, how='left', suffixes= ('' , '_coder1'))
+        merged_df = merged_df.merge(df2[['theme']], left_on='text', right_index=True, how='left', suffixes= ('_coder1' , '_coder2'))
+
+        # Fill NaNs with a placeholder like 'UNCODED' for kappa calculation
+        merged_df['theme_coder1'] = merged_df['theme_coder1'].fillna('UNCODED')
+        merged_df['theme_coder2'] = merged_df['theme_coder2'].fillna('UNCODED')
+
+        # Calculate Cohen's Kappa
+        try:
+            kappa = cohen_kappa_score(merged_df['theme_coder1'], merged_df['theme_coder2'])
+            kappa_scores[f"{coder1_name} vs {coder2_name}"] = kappa
+        except Exception as e:
+            logger.error(f"Error calculating kappa for {coder1_name} vs {coder2_name}: {e}")
+            kappa_scores[f"{coder1_name} vs {coder2_name}"] = float('nan') # Not a Number
+
+    return {"kappa_scores": kappa_scores}
 
 def load_framework(file) -> Dict:
-    """Load and validate a coding framework from JSON file."""
+    """Load a framework from a JSON file."""
     try:
-        framework = json.load(file)
-        required_keys = ['name', 'description', 'codes', 'categories']
-        if not all(key in framework for key in required_keys):
-            raise ValueError("Framework missing required keys")
+        framework_content = file.read().decode("utf-8")
+        framework = json.loads(framework_content)
+        # Basic validation for framework structure
+        if "themes" not in framework or not isinstance(framework["themes"], list):
+            raise ValidationError("Framework JSON must contain a 'themes' list.")
+        for theme in framework["themes"]:
+            if "name" not in theme or "description" not in theme or not isinstance(theme["name"], str):
+                raise ValidationError("Each theme in framework must have a 'name' (string) and 'description'.")
         return framework
-    except json.JSONDecodeError:
-        raise ValueError("Invalid JSON format")
+    except json.JSONDecodeError as e:
+        raise FileProcessingError(f"Invalid JSON in framework file: {e}")
     except Exception as e:
-        raise ValueError(f"Error loading framework: {str(e)}")
+        raise FileProcessingError(f"Error loading framework: {e}")
 
 def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = None) -> List[dict]:
-    """Generates initial codes or themes using the AI."""
-    # This function is not used directly anymore, but is kept for reference or future use.
-    # The prompt building and API call logic is now directly in the main app flow for more control.
-    pass
-
-def analyze_transcript(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> Dict:
-    """Analyze transcript using OpenAI API with streaming response"""
-    try:
-        # Create progress container
-        progress_container = st.empty()
-        progress_container.info("🔄 Initializing AI analysis...")
-        
-        # Prepare the prompt
-        prompt = f"""Analyze the following transcript in the context of this research question: "{research_question}"
-
-Transcript:
-{transcript_text}
-
-Please provide a detailed analysis including:
-1. Key themes and patterns
-2. Relevant quotes and examples
-3. Insights and implications
-4. Recommendations for further research
-
-Format the response in clear sections with markdown formatting."""
-
-        # Initialize OpenAI client
-        client = OpenAI(api_key=st.secrets["openai"]["api_key"])
-        
-        # Update progress
-        progress_container.info("🤖 AI is processing the content...")
-        
-        # Get streaming response
-        stream = client.chat.completions.create(
-            model="gpt-4-turbo-preview",
-            messages=[{"role": "user", "content": prompt}],
-            stream=True
-        )
-        
-        # Process streaming response
-        full_response = ""
-        response_container = st.empty()
-        
-        for chunk in stream:
-            if chunk.choices[0].delta.content:
-                full_response += chunk.choices[0].delta.content
-                response_container.markdown(full_response)
-        
-        # Update progress
-        progress_container.info("✨ Analysis complete! Processing results...")
-        
-        # Process and structure the response
-        # Split the response into sections
-        sections = full_response.split('\n\n')
-        themes = []
-        quotes = []
-        insights = []
-        recommendations = []
-        
-        current_section = None
-        for section in sections:
-            if section.startswith('1.') or 'themes' in section.lower():
-                current_section = 'themes'
-            elif section.startswith('2.') or 'quotes' in section.lower():
-                current_section = 'quotes'
-            elif section.startswith('3.') or 'insights' in section.lower():
-                current_section = 'insights'
-            elif section.startswith('4.') or 'recommendations' in section.lower():
-                current_section = 'recommendations'
-            
-            if current_section == 'themes':
-                themes.append(section)
-            elif current_section == 'quotes':
-                quotes.append(section)
-            elif current_section == 'insights':
-                insights.append(section)
-            elif current_section == 'recommendations':
-                recommendations.append(section)
-        
-        analysis_result = {
-            "themes": themes,
-            "quotes": quotes,
-            "insights": insights,
-            "recommendations": recommendations,
-            "coded_segments": [{"text": q, "code": "Auto-coded", "notes": ""} for q in quotes]
+    """Simulate AI generating codes for a text segment."""
+    # This is a placeholder. Replace with actual AI call.
+    # For demonstration, generate random themes and codes
+    possible_themes = list(THEME_COLORS.keys())
+    
+    # Dummy AI response structure
+    if mode == "Thematic Analysis":
+        response_structure = {
+            "coded_segments": [
+                {
+                    "text": text,
+                    "code": f"Code {random.randint(1, 5)}",
+                    "theme": random.choice(possible_themes),
+                    "notes": "AI generated note."
+                }
+            ]
         }
+    elif mode == "Grounded Theory":
+         response_structure = {
+            "coded_segments": [
+                {
+                    "text": text,
+                    "code": f"InVivoCode {random.randint(1, 3)}",
+                    "theme": "Emergent Theme",
+                    "notes": "Grounded theory initial coding."
+                }
+            ]
+        }
+    elif mode == "Framework Analysis":
+        if not framework or "themes" not in framework:
+            raise ValidationError("Framework is required for Framework Analysis.")
         
-        # Clear progress message
-        progress_container.empty()
+        framework_themes = [t["name"] for t in framework["themes"]]
+        response_structure = {
+            "coded_segments": [
+                {
+                    "text": text,
+                    "code": f"FrameworkCode {random.randint(1, 3)}",
+                    "theme": random.choice(framework_themes), # Select from framework themes
+                    "notes": "Framework analysis applied."
+                }
+            ]
+        }
+    else:
+        raise ValidationError(f"Unknown analysis mode: {mode}")
+
+    # Simulate API call delay
+    time.sleep(0.5) 
+
+    # Validate the dummy response against a simplified schema for safety
+    try:
+        validated_response = validate_ai_response(response_structure, {"coded_segments": list})
+        # Further validate each segment within coded_segments if needed
+        return validated_response["coded_segments"]
+    except AIResponseError as e:
+        logger.error(f"AI response validation failed: {e.message}")
+        raise # Re-raise for error handling decorator
+
+@cache_result(ttl=CACHE_TTL)
+def analyze_transcript(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> Dict:
+    """Analyze the transcript using the selected AI model and mode."""
+    logger.info(f"Starting transcript analysis for mode: {analysis_mode}, RQ: {research_question}")
+    
+    chunks = chunk_text(transcript_text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
+    all_coded_segments = []
+    all_themes = set()
+    
+    total_chunks = len(chunks)
+    for i, chunk in enumerate(chunks):
+        # Simulate AI processing each chunk
+        # In a real scenario, this would be an API call to a coding model
+        coded_segments_for_chunk = ai_generate_codes(chunk, analysis_mode, research_question, framework)
+        all_coded_segments.extend(coded_segments_for_chunk)
+        for segment in coded_segments_for_chunk:
+            if "theme" in segment:
+                all_themes.add(segment["theme"])
         
-        return analysis_result
-        
-    except Exception as e:
-        st.error(f"Error during analysis: {str(e)}")
-        return {}
+        # Update progress and status (this is where the UI update would happen)
+        progress = (i + 1) / total_chunks
+        status = f"Analyzing chunk {i+1}/{total_chunks}..."
+        logger.info(f"Progress: {progress:.2f}, Status: {status}")
+
+    merged_segments = merge_coded_chunks(all_coded_segments)
+
+    # Create a dummy summary
+    summary = f"Analysis complete for research question: '{research_question}'. Identified {len(all_themes)} themes and {len(merged_segments)} coded segments."
+
+    return {
+        "summary": summary,
+        "themes": sorted(list(all_themes)),
+        "coded_segments": merged_segments
+    }
 
 async def process_chunk_async(chunk: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> Dict:
-    """Process a single chunk asynchronously."""
-    try:
-        return await analyze_transcript_async(chunk, research_question, analysis_mode, framework)
-    except Exception as e:
-        logger.error(f"Error processing chunk: {str(e)}")
-        raise
+    """Asynchronously process a single chunk using AI."""
+    # Simulate AI API call, replace with actual API interaction
+    # This part should ideally use an aiohttp call to OpenRouter or similar
+    await asyncio.sleep(0.1) # Simulate async work
+
+    # Call the synchronous ai_generate_codes in a thread pool executor
+    # This is crucial because ai_generate_codes might be blocking (e.g., if it makes synchronous HTTP requests)
+    loop = asyncio.get_event_loop()
+    coded_segments = await loop.run_in_executor(
+        THREAD_POOL,
+        lambda: ai_generate_codes(chunk, analysis_mode, research_question, framework)
+    )
+    return {"coded_segments": coded_segments}
 
 async def process_transcript_async(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> AsyncGenerator[Tuple[float, Dict], None]:
-    """Process transcript asynchronously with progress tracking."""
-    # Chunk the text
-    chunks = chunk_text(transcript_text)
+    """Process the transcript asynchronously with progress updates."""
+    chunks = chunk_text(transcript_text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
     total_chunks = len(chunks)
-    
-    # Process chunks concurrently
-    tasks = []
+    all_coded_segments = []
+    all_themes = set()
+
     for i, chunk in enumerate(chunks):
-        task = asyncio.create_task(
-            process_chunk_async(chunk, research_question, analysis_mode, framework)
-        )
-        tasks.append((i, task))
-    
-    # Collect results as they complete
-    results = []
-    completed_chunks = 0
-    
-    for i, task in tasks:
         try:
-            result = await task
-            results.append(result)
-            completed_chunks += 1
+            chunk_result = await process_chunk_async(chunk, research_question, analysis_mode, framework)
+            coded_segments_for_chunk = chunk_result.get("coded_segments", [])
+            all_coded_segments.extend(coded_segments_for_chunk)
+            for segment in coded_segments_for_chunk:
+                if "theme" in segment:
+                    all_themes.add(segment["theme"])
             
-            # Yield progress for the main thread to pick up
-            progress = completed_chunks / total_chunks
-            yield progress, result
+            progress = (i + 1) / total_chunks
+            status = f"Analyzing chunk {i+1}/{total_chunks}..."
+            yield progress, {"status": status, "type": "progress"}
         except Exception as e:
-            logger.error(f"Error processing chunk {i}: {str(e)}")
-            raise
-    
-    # Yield final merged result (progress 1.0 is handled by the last yield in the loop)
-    final_result = merge_coded_chunks(results)
-    yield 1.0, final_result
+            logger.error(f"Error processing chunk {i+1}: {e}")
+            yield -1.0, {"status": f"Error processing chunk {i+1}: {e}", "type": "error"}
+            return # Stop processing on error
+
+    merged_segments = merge_coded_chunks(all_coded_segments)
+    summary = f"Analysis complete for research question: '{research_question}'. Identified {len(all_themes)} themes and {len(merged_segments)} coded segments."
+
+    final_results = {
+        "summary": summary,
+        "themes": sorted(list(all_themes)),
+        "coded_segments": merged_segments
+    }
+    yield 1.0, {"status": "Analysis complete!", "type": "complete", "results": final_results}
 
 def start_analysis_task(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> str:
-    """Start an asynchronous analysis task."""
-    task_id = generate_cache_key("analysis", transcript_text, research_question, analysis_mode, str(framework))
-    logger.info(f"Starting analysis task with ID: {task_id}")
+    """Starts the analysis as an asynchronous task and returns its ID."""
+    task_id = str(uuid.uuid4()) # Unique ID for the task
     
-    if task_id in st.session_state.active_tasks:
-        logger.info(f"Task {task_id} already active. Returning existing task ID.")
-        return task_id
-    
-    # Set analysis start time
-    st.session_state.analysis_start_time = time.time()
-    logger.info(f"Analysis start time set for task {task_id}: {st.session_state.analysis_start_time}")
-    
-    # Create a queue for this task to send progress updates to the main thread
+    # Create a queue specifically for this task's progress updates
     progress_queue = Queue()
 
-    # Initialize progress tracking in session state
+    # Pass the progress_queue to the async analysis function
+    async def analysis_coroutine():
+        async for progress, data_dict in process_transcript_async(transcript_text, research_question, analysis_mode, framework):
+            if data_dict["type"] == "progress":
+                progress_queue.put(("progress", progress, data_dict["status"]))
+            elif data_dict["type"] == "complete":
+                progress_queue.put(("complete_data", data_dict["results"]))
+                break
+            elif data_dict["type"] == "error":
+                progress_queue.put(("error", data_dict["status"]))
+                break
+        # Ensure final state is always reported to the main thread
+        # (This is handled by 'complete_data' or 'error' messages)
+
+    task_manager.start_task(task_id, analysis_coroutine(), progress_queue)
+    
+    # Initialize session state for this specific task's progress
     st.session_state[f"progress_{task_id}"] = 0.0
     st.session_state[f"status_{task_id}"] = "Starting analysis..."
-    st.session_state["analysis_complete"] = False
-    st.session_state["analysis_results"] = None
-    st.session_state[f"progress_queue_{task_id}"] = progress_queue # Store queue in session state
-    logger.info(f"Session state initialized for task {task_id}, progress queue created.")
     
-    async def analysis_task():
-        final_result = None
-        try:
-            logger.info(f"Running analysis_task for task {task_id}")
-            async for progress, result in process_transcript_async(
-                transcript_text, research_question, analysis_mode, framework
-            ):
-                # Put updates on the queue instead of direct session state modification
-                progress_queue.put(("progress", progress, f"Analyzing transcript... {progress:.1%}"))
-                logger.debug(f"Task {task_id} progress put to queue: {progress:.1%}")
+    st.session_state.analysis_start_time = time.time()
+    st.session_state.analysis_duration = None # Reset duration for new analysis
 
-            final_result = result # The last result yielded when progress is 1.0
-            progress_queue.put(("complete_data", final_result))
-            logger.info(f"Task {task_id} completed successfully, final result put to queue.")
-            
-        except Exception as e:
-            progress_queue.put(("error", str(e)))
-            logger.error(f"Error in analysis task {task_id}: {str(e)}")
-            logger.error(traceback.format_exc())
-            st.error(f"Error during analysis: {str(e)}") # Display error immediately
-            # Do not re-raise here, let the queue signal completion/error
-
-    task_manager.start_task(task_id, analysis_task(), progress_queue) # Pass queue to task manager
-    st.session_state.active_tasks.add(task_id)
-    logger.info(f"Async task {task_id} handed to task_manager.")
     return task_id
 
-# Add debug information to the UI
-if st.sidebar.checkbox("Show Debug Information"):
-    st.sidebar.write("### Debug Information")
-    st.sidebar.write(f"Cache TTL: {CACHE_TTL} seconds")
-    st.sidebar.write(f"Max File Size: {MAX_FILE_SIZE/1024/1024}MB")
-    st.sidebar.write(f"Chunk Size: {CHUNK_SIZE} words")
-    st.sidebar.write(f"Chunk Overlap: {OVERLAP} words")
-    
-    if 'analysis_start_time' in st.session_state and st.session_state.analysis_start_time is not None:
-        duration = time.time() - st.session_state.analysis_start_time
-        st.sidebar.write(f"Last Analysis Duration: {duration:.2f} seconds")
-
+# Run the main application function
 if __name__ == "__main__":
     main()

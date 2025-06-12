@@ -7,4 +7,9 @@ requests==2.31.0
 numpy==1.26.4
 scikit-learn==1.4.1.post1
 aiohttp==3.9.3
-python-multipart==0.0.9 
+python-multipart==0.0.9
+openai==1.16.2
+PyMuPDF==1.23.8
+tiktoken==0.5.2
+plotly==5.18.0
+streamlit-option-menu==0.3.12 

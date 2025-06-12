@@ -101,15 +101,36 @@ def cache_result(ttl: int = CACHE_TTL, max_size: int = MAX_CACHE_SIZE):
     return decorator
 
 class AsyncTaskManager:
-    """Manages asynchronous tasks and their results."""
+    """Manages asynchronous tasks and their results using a single asyncio event loop in a dedicated thread."""
     def __init__(self):
         self.tasks = {}
         self.results = {}
         self.progress_queues: Dict[str, Queue] = {}
         self.lock = threading.Lock()
-    
+        self.loop = None
+        self.thread = None
+
+        # Start the asyncio event loop in a dedicated thread
+        self._start_event_loop_thread()
+
+    def _start_event_loop_thread(self):
+        """Starts a dedicated thread to run the asyncio event loop."""
+        if self.thread is None or not self.thread.is_alive():
+            self.loop = asyncio.new_event_loop()
+            self.thread = threading.Thread(target=self._run_event_loop, args=(self.loop,), daemon=True)
+            self.thread.start()
+            logger.info("Started dedicated asyncio event loop thread.")
+
+    def _run_event_loop(self, loop):
+        """Target function for the dedicated event loop thread."""
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
+
     def start_task(self, task_id: str, coro, progress_queue: Queue):
-        """Start an asynchronous task."""
+        """Submit an asynchronous task to the dedicated event loop."""
+        if self.loop is None or not self.thread.is_alive():
+            self._start_event_loop_thread() # Re-start if thread died
+
         async def wrapped_task():
             try:
                 result = await coro
@@ -123,10 +144,10 @@ class AsyncTaskManager:
                     progress_queue.put(("error", str(e))) # Signal error
                 raise
         
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        self.tasks[task_id] = loop.create_task(wrapped_task())
+        # Submit the coroutine to the event loop in the dedicated thread
+        asyncio.run_coroutine_threadsafe(wrapped_task(), self.loop)
         self.progress_queues[task_id] = progress_queue
+        logger.debug(f"Task {task_id} submitted to dedicated event loop.")
     
     def get_result(self, task_id: str) -> Optional[Any]:
         """Get the result of a task if it's complete."""
@@ -152,12 +173,13 @@ class AsyncTaskManager:
         """Clean up a completed task."""
         with self.lock:
             if task_id in self.tasks:
-                self.tasks[task_id].cancel()
+                self.tasks[task_id].cancel() # Cancel the asyncio task
                 del self.tasks[task_id]
             if task_id in self.results:
                 del self.results[task_id]
             if task_id in self.progress_queues:
                 del self.progress_queues[task_id]
+            logger.debug(f"Task {task_id} cleaned up from AsyncTaskManager.")
 
 # Initialize task manager
 task_manager = AsyncTaskManager()

@@ -25,19 +25,42 @@ import aiohttp
 from functools import lru_cache
 import hashlib
 import logging
+from openai import OpenAI
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Initialize session state variables
+if "analysis_mode" not in st.session_state:
+    st.session_state.analysis_mode = "Inductive"
+if "transcript_text" not in st.session_state:
+    st.session_state.transcript_text = None
+if "research_question" not in st.session_state:
+    st.session_state.research_question = ""
+if "framework" not in st.session_state:
+    st.session_state.framework = None
+if "analysis_complete" not in st.session_state:
+    st.session_state.analysis_complete = False
+if "analysis_results" not in st.session_state:
+    st.session_state.analysis_results = {}
+if "coded_segments" not in st.session_state:
+    st.session_state.coded_segments = []
+if "themes" not in st.session_state:
+    st.session_state.themes = []
+if "analysis_start_time" not in st.session_state:
+    st.session_state.analysis_start_time = None
+if "coded_results" not in st.session_state:
+    st.session_state.coded_results = []
+
 # Constants
 VALID_TRANSCRIPT_TYPES = [".txt", ".docx", ".pdf"]
-VALID_FRAMEWORK_TYPES = ["json", "txt"]
+VALID_FRAMEWORK_TYPES = [".txt", ".docx", ".pdf"]  # Updated framework file types
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "deepseek/deepseek-chat:free"
 MAX_TOKENS = 4000
 TEMPERATURE = 0.7
-CHUNK_SIZE = 1500  # Reduced for better context management
+CHUNK_SIZE = 1500
 OVERLAP = 200
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 CHUNK_READ_SIZE = 1024 * 1024  # 1 MB chunks for streaming
@@ -219,9 +242,12 @@ def highlight_text(text, theme, color):
     """Wrap text in HTML mark tag with specified color"""
     return f'<mark style="background-color: {color}">{text}</mark>'
 
-# Initialize session state
-if 'knowledge_base' not in st.session_state:
-    st.session_state.knowledge_base = {}
+# Initialize the Streamlit app
+st.set_page_config(
+    page_title="Qualinsight AI - Qualitative Analysis",
+    page_icon="🔍",
+    layout="wide"
+)
 
 # Knowledge Base File Operations
 def load_knowledge_base() -> Dict[str, Dict[str, Any]]:
@@ -248,36 +274,16 @@ st.title("QualInsight AI - Qualitative Research Assistant")
 tab1, tab2, tab3, tab4 = st.tabs(["Input", "Analysis", "Results", "Export"])
 
 with tab1:
-    st.header("Step 1: Input")
+    st.header("Input")
     
-    # Framework Upload (for deductive analysis)
-    if st.session_state.analysis_mode == "Deductive":
-        st.subheader("Coding Framework")
-        framework_file = st.file_uploader("Upload Framework (JSON)", type=["json"])
-        
-        if framework_file:
-            try:
-                framework = load_framework(framework_file)
-                with st.sidebar:
-                    st.subheader("Framework Preview")
-                    st.write(f"**Name:** {framework['name']}")
-                    st.write(f"**Description:** {framework['description']}")
-                    
-                    st.write("**Categories and Codes:**")
-                    for category in framework['categories']:
-                        with st.expander(category['name']):
-                            for code in category['codes']:
-                                st.write(f"- {code['name']}: {code['description']}")
-                
-                st.session_state.framework = framework
-            except ValueError as e:
-                st.error(str(e))
+    # Input method selection
+    input_method = st.radio(
+        "Choose input method:",
+        ["Upload File", "Paste Text"],
+        key="input_method"
+    )
     
-    st.subheader("Upload Transcript")
-    input_method = st.radio("Choose input method:", ["Upload File", "Paste Text"], key="input_method_radio")
-
-    transcript_text = None
-
+    # File upload or text input (moved before research question)
     if input_method == "Upload File":
         uploaded_file = st.file_uploader(
             "Upload transcript (.txt, .docx, or .pdf)",
@@ -287,173 +293,161 @@ with tab1:
         if uploaded_file is not None:
             if uploaded_file.size > MAX_FILE_SIZE:
                 st.warning(f"File size ({uploaded_file.size/1024/1024:.1f}MB) exceeds {MAX_FILE_SIZE/1024/1024}MB limit. Processing may take longer.")
-            transcript_text = process_transcript(uploaded_file)
+            st.session_state.transcript_text = process_transcript(uploaded_file)
     else:
-        pasted_text = st.text_area("Paste your transcript here:", height=300, key="transcript_text_area")
-        if pasted_text:
-            transcript_text = [pasted_text]
-
-    # Research Questions
-    research_questions = st.text_area(
-        "Your Research Questions:",
-        "",
-        height=100,
-        key="research_questions_text_area",
-        help="Enter the research questions guiding your analysis."
+        st.session_state.transcript_text = st.text_area(
+            "Paste your transcript here:",
+            value=st.session_state.transcript_text if st.session_state.transcript_text else "",
+            key="transcript_text_input"
+        )
+    
+    # Research question input
+    st.session_state.research_question = st.text_area(
+        "Enter your research question:",
+        value=st.session_state.research_question,
+        key="research_question_input"
     )
-
-    # Analysis Mode Selection
-    analysis_mode = st.radio(
-        "Select Analysis Approach:",
-        ("Inductive", "Deductive"),
-        key="analysis_mode_radio",
-        index=0  # Default to Inductive
+    
+    # Analysis mode selection
+    st.session_state.analysis_mode = st.radio(
+        "Choose analysis mode:",
+        ["Inductive", "Deductive"],
+        key="analysis_mode_radio"
     )
-    st.session_state.analysis_mode = analysis_mode
+    
+    # Framework upload for deductive analysis
+    if st.session_state.analysis_mode == "Deductive":
+        framework_file = st.file_uploader(
+            "Upload theoretical framework (PDF, DOCX, or TXT)",
+            type=VALID_FRAMEWORK_TYPES,
+            key="framework_uploader",
+            help="Upload your theoretical framework document that guides your research analysis"
+        )
+        if framework_file is not None:
+            try:
+                if framework_file.name.endswith('.pdf'):
+                    st.session_state.framework = extract_text_from_pdf(framework_file)
+                elif framework_file.name.endswith('.docx'):
+                    st.session_state.framework = extract_text_from_docx(framework_file)
+                else:  # .txt
+                    st.session_state.framework = extract_text_from_txt(framework_file)
+                st.success("Framework loaded successfully!")
+            except Exception as e:
+                st.error(f"Error loading framework: {str(e)}")
 
 with tab2:
-    st.header("Step 2: Analysis")
+    st.header("Analysis")
     
-    # Analysis Parameters
-    with st.expander("Analysis Parameters", expanded=False):
-        temperature = st.slider("Temperature", 0.0, 1.0, TEMPERATURE, 0.1,
-                              help="Higher values make output more random, lower values more focused")
-        max_tokens = st.slider("Max Tokens", 1000, 8000, MAX_TOKENS, 1000,
-                             help="Maximum number of tokens to generate")
-        model = st.selectbox("Model", ["deepseek/deepseek-chat:free", "deepseek/deepseek-chat:paid"],
-                           help="Select the model to use for analysis")
-        
-        # Chunking parameters
-        st.subheader("Chunking Settings")
-        chunk_size = st.slider("Chunk Size", 500, 3000, CHUNK_SIZE, 100,
-                             help="Size of text chunks for analysis")
-        overlap = st.slider("Overlap", 50, 500, OVERLAP, 50,
-                          help="Number of words to overlap between chunks")
-
-    # --- Trigger Analysis Button ---
-    if st.button("Start Analysis", key="start_analysis_button"):
-        if not transcript_text:
-            st.error("Please upload or paste a transcript to start analysis.")
-        elif not research_questions:
-            st.error("Please enter your research questions to start analysis.")
+    # Analysis parameters
+    with st.expander("Analysis Parameters"):
+        temperature = st.slider(
+            "Temperature (creativity)",
+            min_value=0.0,
+            max_value=1.0,
+            value=TEMPERATURE,
+            step=0.1,
+            key="temperature_slider"
+        )
+        max_tokens = st.slider(
+            "Max Tokens",
+            min_value=1000,
+            max_value=8000,
+            value=MAX_TOKENS,
+            step=1000,
+            key="max_tokens_slider"
+        )
+    
+    # Start analysis button
+    if st.button("Start Analysis", key="start_analysis"):
+        st.info("Start Analysis button clicked!")
+        if not st.session_state.transcript_text:
+            st.error("Please provide a transcript first.")
+            st.info(f"Transcript text: {st.session_state.transcript_text}")
+        elif not st.session_state.research_question:
+            st.error("Please enter a research question.")
+            st.info(f"Research question: {st.session_state.research_question}")
+        elif st.session_state.analysis_mode == "Deductive" and not st.session_state.framework:
+            st.error("Please upload a theoretical framework for deductive analysis.")
+            st.info(f"Analysis mode: {st.session_state.analysis_mode}, Framework: {st.session_state.framework}")
         else:
+            st.info("All conditions met, starting analysis...")
+            st.session_state.analysis_start_time = time.time()
+            st.session_state.analysis_complete = False
+            st.session_state.coded_segments = []
+            st.session_state.themes = []
+            
             # Create progress bar
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # Process the chunks
-            all_results = []
-            for i, chunk in enumerate(transcript_text):
-                try:
-                    status_text.text(f"Processing chunk {i+1} of {len(transcript_text)}...")
-                    progress_bar.progress((i + 1) / len(transcript_text))
-                    
-                    # First stage prompt - focus on identifying codes and organizing by respondent
-                    system_prompt = """You are an AI assistant analyzing qualitative research transcripts.
-                    For this first stage, focus on:
-                    1. Identifying key codes/themes in the text
-                    2. Organizing codes by respondent
-                    3. Providing brief notes for each code
-
-                    IMPORTANT: Your response MUST be a plain text string, with each code entry separated by `###CODE_ENTRY###`. Each entry must contain the following fields, delimited by `|||`:
-                    - RESPONDENT: <respondent identifier>
-                    - TEXT: <exact quote from transcript>
-                    - CODE: <code/theme label>
-                    - NOTES: <brief explanation>
-
-                    Example response format:
-                    RESPONDENT: P1 ||| TEXT: The interface was very intuitive ||| CODE: UI Clarity ||| NOTES: Positive feedback about interface design###CODE_ENTRY###
-                    """
-                    
-                    messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"Research Questions: {research_questions}\n\nTranscript Chunk:\n{chunk}"}
-                    ]
-                    
-                    response = get_ai_response(messages, stream=True)
-                    if response:
-                        # Process streaming response
-                        full_response = ""
-                        response_container = st.empty()
+            try:
+                # Process the transcript
+                if isinstance(st.session_state.transcript_text, list):
+                    st.session_state.total_chunks = len(st.session_state.transcript_text)
+                    st.info(f"Processing {st.session_state.total_chunks} chunks...")
+                    for i, chunk in enumerate(st.session_state.transcript_text):
+                        st.session_state.current_chunk = i + 1
+                        status_text.text(f"Processing chunk {i+1} of {st.session_state.total_chunks}")
+                        progress_bar.progress((i + 1) / st.session_state.total_chunks)
                         
-                        for line in response.iter_lines():
-                            if line:
-                                try:
-                                    json_response = json.loads(line.decode('utf-8').replace('data: ', ''))
-                                    if 'choices' in json_response and len(json_response['choices']) > 0:
-                                        content = json_response['choices'][0].get('delta', {}).get('content', '')
-                                        if content:
-                                            full_response += content
-                                            response_container.markdown(full_response)
-                                except json.JSONDecodeError:
-                                    continue
+                        # Analyze chunk with AI
+                        with st.spinner("🤖 AI is analyzing chunk {i+1} of {st.session_state.total_chunks}..."):
+                            analysis_result = analyze_transcript(
+                                chunk,
+                                st.session_state.research_question,
+                                st.session_state.analysis_mode,
+                                st.session_state.framework
+                            )
                         
-                        # Process the full response
-                        try:
-                            code_entries = full_response.split('###CODE_ENTRY###')
-                            chunk_results = []
-                            for entry in code_entries:
-                                if entry.strip():
-                                    parts = entry.split('|||')
-                                    if len(parts) == 4:
-                                        result = {
-                                            'respondent': parts[0].replace('RESPONDENT:', '').strip(),
-                                            'text': parts[1].replace('TEXT:', '').strip(),
-                                            'code': parts[2].replace('CODE:', '').strip(),
-                                            'notes': parts[3].replace('NOTES:', '').strip()
-                                        }
-                                        chunk_results.append(result)
-                            all_results.append(chunk_results)
-                        except Exception as e:
-                            st.error(f"Failed to parse AI response for chunk {i+1}. Error: {str(e)}")
-                            st.text("Raw response:")
-                            st.text(full_response)
-                            continue
-                except Exception as e:
-                    st.error(f"Error processing chunk {i+1}: {str(e)}")
-            
-            # Merge results from all chunks
-            if all_results:
-                merged_results = merge_coded_chunks(all_results)
-                st.session_state.coded_results = merged_results
-            
-            # Clear progress indicators
-            progress_bar.empty()
-            status_text.empty()
+                        if analysis_result:
+                            st.session_state.coded_segments.extend(analysis_result.get('coded_segments', []))
+                            st.session_state.themes.extend(analysis_result.get('themes', []))
+                            st.info(f"Chunk {i+1} analysis result processed.")
+                
+                # After processing all chunks, set coded_results
+                st.session_state.coded_results = st.session_state.coded_segments
+                st.info(f"Coded results set: {len(st.session_state.coded_results)} segments.")
+
+                st.session_state.analysis_complete = True
+                status_text.text("Analysis complete!")
+                progress_bar.progress(1.0)
+                
+                # Show results immediately
+                st.success("Analysis completed!")
+                st.rerun()  # Refresh to show results
+                
+            except Exception as e:
+                st.error(f"Error during analysis: {str(e)}")
+                status_text.text("Analysis failed!")
+                progress_bar.progress(0)
 
 with tab3:
     st.header("Step 3: Results")
     
-    if 'coded_results' in st.session_state:
+    if 'coded_results' in st.session_state and st.session_state.coded_results:
         # Create DataFrame for initial coding
         df_initial = pd.DataFrame(st.session_state.coded_results)
         
         # Display results in expandable sections
-        with st.expander("Coding by Respondent", expanded=True):
-            for respondent in df_initial['respondent'].unique():
-                st.write(f"**Respondent: {respondent}**")
-                respondent_df = df_initial[df_initial['respondent'] == respondent]
+        with st.expander("Coded Segments", expanded=True):
+            st.data_editor(
+                df_initial[['text', 'code', 'notes']],
+                key="coded_segments_editor",
+                num_rows="dynamic",
+                use_container_width=True
+            )
+            
+            # Update the original dataframe with edited values
+            # The data_editor directly modifies the dataframe, so we just need to ensure session state is updated
+            st.session_state.coded_results = df_initial.to_dict('records')
                 
-                # Create editable dataframe
-                edited_df = st.data_editor(
-                    respondent_df[['text', 'code', 'notes']],
-                    key=f"editor_{respondent}",
-                    num_rows="dynamic",
-                    use_container_width=True
-                )
-                
-                # Update the original dataframe with edited values
-                if edited_df is not None:
-                    df_initial.update(edited_df)
-                    st.session_state.coded_results = df_initial.to_dict('records')
-                
-                st.write("---")
+            st.write("---")
         
         # Theme Development
         with st.expander("Theme Development", expanded=False):
             if st.button("Proceed to Theme Development", key="theme_development"):
                 try:
-                    with st.spinner("Developing themes and subthemes..."):
+                    with st.spinner("🤖 AI is developing themes and subthemes... This may take a few minutes."):
                         # Second stage prompt - focus on theme development
                         system_prompt = """You are an AI assistant developing themes from coded transcript segments.
                         For this second stage, focus on:
@@ -477,7 +471,7 @@ with tab3:
                         
                         messages = [
                             {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"Research Questions: {research_questions}\n\nCoded Transcript:\n{coding_summary_str}"}
+                            {"role": "user", "content": f"Research Questions: {st.session_state.research_question}\n\nCoded Transcript:\n{coding_summary_str}"}
                         ]
                         
                         response = get_ai_response(messages)
@@ -505,7 +499,7 @@ with tab3:
                                 
                                 # Create highlighted transcript
                                 with st.expander("Highlighted Transcript", expanded=False):
-                                    highlighted_text = transcript_text[0]  # Assuming single transcript
+                                    highlighted_text = st.session_state.transcript_text[0]  # Assuming single transcript
                                     
                                     # Apply highlights
                                     for _, row in df_themes.iterrows():
@@ -589,7 +583,7 @@ with tab4:
                 
                 # Add research questions
                 doc.add_heading("Research Questions", level=1)
-                doc.add_paragraph(research_questions)
+                doc.add_paragraph(st.session_state.research_question)
                 
                 # Add initial coding
                 doc.add_heading("Initial Coding", level=1)
@@ -615,7 +609,7 @@ with tab4:
                 
                 # Add highlighted transcript
                 doc.add_heading("Highlighted Transcript", level=1)
-                doc.add_paragraph(highlighted_text)
+                doc.add_paragraph(st.session_state.transcript_text[0])
                 
                 doc_stream = BytesIO()
                 doc.save(doc_stream)
@@ -709,6 +703,97 @@ def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = 
     # This function is not used directly anymore, but is kept for reference or future use.
     # The prompt building and API call logic is now directly in the main app flow for more control.
     pass
+
+def analyze_transcript(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> Dict:
+    """Analyze transcript using OpenAI API with streaming response"""
+    try:
+        # Create progress container
+        progress_container = st.empty()
+        progress_container.info("🔄 Initializing AI analysis...")
+        
+        # Prepare the prompt
+        prompt = f"""Analyze the following transcript in the context of this research question: "{research_question}"
+
+Transcript:
+{transcript_text}
+
+Please provide a detailed analysis including:
+1. Key themes and patterns
+2. Relevant quotes and examples
+3. Insights and implications
+4. Recommendations for further research
+
+Format the response in clear sections with markdown formatting."""
+
+        # Initialize OpenAI client
+        client = OpenAI(api_key=st.secrets["openai"]["api_key"])
+        
+        # Update progress
+        progress_container.info("🤖 AI is processing the content...")
+        
+        # Get streaming response
+        stream = client.chat.completions.create(
+            model="gpt-4-turbo-preview",
+            messages=[{"role": "user", "content": prompt}],
+            stream=True
+        )
+        
+        # Process streaming response
+        full_response = ""
+        response_container = st.empty()
+        
+        for chunk in stream:
+            if chunk.choices[0].delta.content:
+                full_response += chunk.choices[0].delta.content
+                response_container.markdown(full_response)
+        
+        # Update progress
+        progress_container.info("✨ Analysis complete! Processing results...")
+        
+        # Process and structure the response
+        # Split the response into sections
+        sections = full_response.split('\n\n')
+        themes = []
+        quotes = []
+        insights = []
+        recommendations = []
+        
+        current_section = None
+        for section in sections:
+            if section.startswith('1.') or 'themes' in section.lower():
+                current_section = 'themes'
+            elif section.startswith('2.') or 'quotes' in section.lower():
+                current_section = 'quotes'
+            elif section.startswith('3.') or 'insights' in section.lower():
+                current_section = 'insights'
+            elif section.startswith('4.') or 'recommendations' in section.lower():
+                current_section = 'recommendations'
+            
+            if current_section == 'themes':
+                themes.append(section)
+            elif current_section == 'quotes':
+                quotes.append(section)
+            elif current_section == 'insights':
+                insights.append(section)
+            elif current_section == 'recommendations':
+                recommendations.append(section)
+        
+        analysis_result = {
+            "themes": themes,
+            "quotes": quotes,
+            "insights": insights,
+            "recommendations": recommendations,
+            "coded_segments": [{"text": q, "code": "Auto-coded", "notes": ""} for q in quotes]
+        }
+        
+        # Clear progress message
+        progress_container.empty()
+        
+        return analysis_result
+        
+    except Exception as e:
+        st.error(f"Error during analysis: {str(e)}")
+        return {}
 
 # Add debug information to the UI
 if st.sidebar.checkbox("Show Debug Information"):

@@ -1,10 +1,9 @@
 import sys
 import streamlit as st
 import pandas as pd
-import re
 import random
 import io
-from openai import OpenAI
+# from openai import OpenAI # Not directly used for OpenRouter
 import json
 from io import BytesIO
 from typing import List, Optional, Dict, Any
@@ -15,14 +14,14 @@ from reportlab.lib.styles import getSampleStyleSheet
 from pdfminer.high_level import extract_text as pdf_extract_text
 import tempfile
 import time
-import openai
+# import openai # Not directly used for OpenRouter
 import requests
 import os
 
 # Constants
 VALID_TRANSCRIPT_TYPES = [".txt", ".docx", ".pdf"]
 VALID_FRAMEWORK_TYPES = ["json", "txt"]
-API_URL = 'https://openrouter.ai/api/v1/chat/completions'
+API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "deepseek/deepseek-chat:free"
 MAX_TOKENS = 4000
 TEMPERATURE = 0.7
@@ -34,10 +33,10 @@ API_KEY = st.secrets["OPENROUTER_API_KEY"]
 
 # Define the headers for the API request
 headers = {
-    'Authorization': f'Bearer {API_KEY}',
-    'Content-Type': 'application/json',
-    'HTTP-Referer': 'https://github.com/baha-ti/Qualinsight-AI',
-    'X-Title': 'Qualinsight AI'
+    "Authorization": f"Bearer {API_KEY}",
+    "Content-Type": "application/json",
+    "HTTP-Referer": "https://github.com/baha-ti/Qualinsight-AI",
+    "X-Title": "Qualinsight AI"
 }
 
 def get_ai_response(messages):
@@ -82,11 +81,9 @@ def save_knowledge_base(kb: Dict[str, Dict[str, Any]]):
 # Load knowledge base at startup
 st.session_state.knowledge_base = load_knowledge_base()
 
-# --- Title ---
-st.title("QualInsight AI - Qualitative Research Assistant")
+# --- Title ---\nst.title("QualInsight AI - Qualitative Research Assistant")
 
-# --- Step 1: Input Section ---
-st.header("Step 1: Input")
+# --- Step 1: Input Section ---\nst.header("Step 1: Input")
 st.subheader("Upload Transcript")
 input_method = st.radio("Choose input method:", ["Upload File", "Paste Text"], key="input_method_radio")
 
@@ -102,60 +99,49 @@ else:
         transcript_text = [pasted_text]
 
 # Research Questions
-st.subheader("Research Questions")
-research_questions = st.text_area("Enter your research question(s):", height=100, key="research_questions")
+research_questions = st.text_area(
+    "Your Research Questions:",
+    "",
+    height=100,
+    key="research_questions_text_area",
+    help="Enter the research questions guiding your analysis."
+)
 
-# Analysis Settings
-st.subheader("Analysis Settings")
-analysis_mode = st.radio("Choose analysis approach:", ["Inductive", "Deductive"], key="analysis_mode_radio")
+# Analysis Mode Selection
+analysis_mode = st.radio(
+    "Select Analysis Approach:",
+    ("Inductive", "Deductive"),
+    key="analysis_mode_radio",
+    index=0  # Default to Inductive
+)
+st.session_state.analysis_mode = analysis_mode
 
-# Knowledge Base Management
-st.subheader("Knowledge Base Management")
-kb_action = st.radio("Knowledge Base Action:", ["Use Existing", "Add New", "Edit Existing", "Delete"], key="kb_action_radio")
+# Knowledge Base Management (Theories/Frameworks)
+if st.session_state.analysis_mode == "Deductive":
+    st.subheader("Knowledge Base Management")
 
-if kb_action == "Add New":
-    with st.form("new_framework_form"):
-        kb_name = st.text_input("Enter name for this framework/theory:", key="new_kb_name")
-        st.subheader("Framework Structure")
-        overview = st.text_area("Overview/Description:", height=100, key="new_overview")
-        key_concepts = st.text_area("Key Concepts (one per line):", height=100, key="new_key_concepts")
-        methodology = st.text_area("Methodology/Approach:", height=100, key="new_methodology")
-        applications = st.text_area("Applications/Use Cases:", height=100, key="new_applications")
-        references = st.text_area("References:", height=100, key="new_references")
-        
-        if st.form_submit_button("Save to Knowledge Base"):
-            if kb_name and overview:
-                framework_data = {
-                    "overview": overview,
-                    "key_concepts": key_concepts,
-                    "methodology": methodology,
-                    "applications": applications,
-                    "references": references,
-                    "last_modified": time.strftime("%Y-%m-%d %H:%M:%S")
-                }
-                st.session_state.knowledge_base[kb_name] = framework_data
-                save_knowledge_base(st.session_state.knowledge_base)
-                st.success(f"Saved '{kb_name}' to knowledge base!")
+    kb_action = st.radio(
+        "Choose action:",
+        ("Add New", "Use Existing", "Edit Existing", "Delete"),
+        key="kb_action_radio"
+    )
 
-elif kb_action == "Edit Existing":
-    if st.session_state.knowledge_base:
-        selected_kb = st.selectbox("Select Framework/Theory to Edit:", list(st.session_state.knowledge_base.keys()), key="edit_kb_select")
-        framework_data = st.session_state.knowledge_base[selected_kb]
-        
-        with st.form("edit_framework_form"):
-            new_name = st.text_input("Framework/Theory Name:", value=selected_kb, key="edit_kb_name")
-            overview = st.text_area("Overview/Description:", value=framework_data.get("overview", ""), height=100, key="edit_overview")
-            key_concepts = st.text_area("Key Concepts:", value=framework_data.get("key_concepts", ""), height=100, key="edit_key_concepts")
-            methodology = st.text_area("Methodology/Approach:", value=framework_data.get("methodology", ""), height=100, key="edit_methodology")
-            applications = st.text_area("Applications/Use Cases:", value=framework_data.get("applications", ""), height=100, key="edit_applications")
-            references = st.text_area("References:", value=framework_data.get("references", ""), height=100, key="edit_references")
+    # Initialize knowledge base in session state if it doesn't exist
+    if "knowledge_base" not in st.session_state:
+        st.session_state.knowledge_base = load_knowledge_base()
+
+    if kb_action == "Add New":
+        with st.form("new_framework_form"):
+            kb_name = st.text_input("Enter name for this framework/theory:", key="new_kb_name")
+            st.subheader("Framework Structure")
+            overview = st.text_area("Overview/Description:", height=100, key="new_overview")
+            key_concepts = st.text_area("Key Concepts (one per line):", height=100, key="new_key_concepts")
+            methodology = st.text_area("Methodology/Approach:", height=100, key="new_methodology")
+            applications = st.text_area("Applications/Use Cases:", height=100, key="new_applications")
+            references = st.text_area("References:", height=100, key="new_references")
             
-            if st.form_submit_button("Update Framework"):
-                if new_name:
-                    # Remove old entry if name changed
-                    if new_name != selected_kb:
-                        del st.session_state.knowledge_base[selected_kb]
-                    
+            if st.form_submit_button("Save to Knowledge Base"):
+                if kb_name and overview:
                     framework_data = {
                         "overview": overview,
                         "key_concepts": key_concepts,
@@ -164,17 +150,48 @@ elif kb_action == "Edit Existing":
                         "references": references,
                         "last_modified": time.strftime("%Y-%m-%d %H:%M:%S")
                     }
-                    st.session_state.knowledge_base[new_name] = framework_data
+                    st.session_state.knowledge_base[kb_name] = framework_data
                     save_knowledge_base(st.session_state.knowledge_base)
-                    st.success(f"Updated '{new_name}' in knowledge base!")
+                    st.success(f"Saved '{kb_name}' to knowledge base!")
 
-elif kb_action == "Delete":
-    if st.session_state.knowledge_base:
-        selected_kb = st.selectbox("Select Framework/Theory to Delete:", list(st.session_state.knowledge_base.keys()), key="delete_kb_select")
-        if st.button("Delete Framework", key="delete_kb_button"):
-            del st.session_state.knowledge_base[selected_kb]
-            save_knowledge_base(st.session_state.knowledge_base)
-            st.success(f"Deleted '{selected_kb}' from knowledge base!")
+    elif kb_action == "Edit Existing":
+        if st.session_state.knowledge_base:
+            selected_kb = st.selectbox("Select Framework/Theory to Edit:", list(st.session_state.knowledge_base.keys()), key="edit_kb_select")
+            framework_data = st.session_state.knowledge_base[selected_kb]
+            
+            with st.form("edit_framework_form"):
+                new_name = st.text_input("Framework/Theory Name:", value=selected_kb, key="edit_kb_name")
+                overview = st.text_area("Overview/Description:", value=framework_data.get("overview", ""), height=100, key="edit_overview")
+                key_concepts = st.text_area("Key Concepts:", value=framework_data.get("key_concepts", ""), height=100, key="edit_key_concepts")
+                methodology = st.text_area("Methodology/Approach:", value=framework_data.get("methodology", ""), height=100, key="edit_methodology")
+                applications = st.text_area("Applications/Use Cases:", value=framework_data.get("applications", ""), height=100, key="edit_applications")
+                references = st.text_area("References:", value=framework_data.get("references", ""), height=100, key="edit_references")
+                
+                if st.form_submit_button("Update Framework"):
+                    if new_name:
+                        # Remove old entry if name changed
+                        if new_name != selected_kb:
+                            del st.session_state.knowledge_base[selected_kb]
+                        
+                        framework_data = {
+                            "overview": overview,
+                            "key_concepts": key_concepts,
+                            "methodology": methodology,
+                            "applications": applications,
+                            "references": references,
+                            "last_modified": time.strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        st.session_state.knowledge_base[new_name] = framework_data
+                        save_knowledge_base(st.session_state.knowledge_base)
+                        st.success(f"Updated '{new_name}' in knowledge base!")
+
+    elif kb_action == "Delete":
+        if st.session_state.knowledge_base:
+            selected_kb = st.selectbox("Select Framework/Theory to Delete:", list(st.session_state.knowledge_base.keys()), key="delete_kb_select")
+            if st.button("Delete Framework", key="delete_kb_button"):
+                del st.session_state.knowledge_base[selected_kb]
+                save_knowledge_base(st.session_state.knowledge_base)
+                st.success(f"Deleted '{selected_kb}' from knowledge base!")
 
 # Only show framework/theory selection for deductive analysis
 if analysis_mode == "Deductive":
@@ -194,14 +211,19 @@ if analysis_mode == "Deductive":
 else:
     framework_text = ""
 
-# --- Step 2: Processing ---
-if transcript_text and research_questions:
-    if st.button("Start Analysis", key="start_analysis"):
+# --- Trigger Analysis Button ---\
+if st.button("Start Analysis", key="start_analysis_button"):
+    if not transcript_text:
+        st.error("Please upload or paste a transcript to start analysis.")
+    elif not research_questions:
+        st.error("Please enter your research questions to start analysis.")
+    else:
+        # --- Step 2: Processing ---\
         st.header("Step 2: Analysis Results")
-        
+
         # Stage 1: Initial Coding
         st.subheader("Stage 1: Initial Coding")
-        
+
         # Process the chunks
         all_results = []
         for i, chunk in enumerate(transcript_text):
@@ -213,30 +235,16 @@ if transcript_text and research_questions:
                     1. Identifying the respondent/speaker (if not already marked)
                     2. Breaking down the text into meaningful segments
                     3. Assigning initial codes to each segment
-                    
-                    IMPORTANT: Your response MUST be a valid JSON array. Each object in the array must have these exact fields:
-                    {
-                        "respondent": "name or identifier of the speaker",
-                        "text": "exact quote from transcript",
-                        "code": "initial code for this segment",
-                        "notes": "any additional observations"
-                    }
-                    
+
+                    IMPORTANT: Your response MUST be a plain text string, with each coded entry separated by `###CODING_ENTRY###`. Each entry must contain the following fields, delimited by `|||`:
+                    - RESPONDENT: <name or identifier of the speaker>
+                    - TEXT: <exact quote from transcript>
+                    - CODE: <initial code for this segment>
+                    - NOTES: <any additional observations>
+
                     Example response format:
-                    [
-                        {
-                            "respondent": "Participant 1",
-                            "text": "I found the exercise challenging",
-                            "code": "Difficulty Level",
-                            "notes": "Mentioned challenge with specific task"
-                        },
-                        {
-                            "respondent": "Participant 2",
-                            "text": "The instructions were clear",
-                            "code": "Clarity",
-                            "notes": "Positive feedback on instructions"
-                        }
-                    ]
+                    RESPONDENT: Participant 1 ||| TEXT: I found the exercise challenging, especially when I had to \"think outside the box\". ||| CODE: Difficulty Level ||| NOTES: Mentioned challenge with specific task and metaphorical thinking.\nAlso noted time constraints.###CODING_ENTRY###
+                    RESPONDENT: Participant 2 ||| TEXT: The instructions were clear. ||| CODE: Clarity ||| NOTES: Positive feedback on instructions###CODING_ENTRY###
                     """
                     
                     messages = [
@@ -247,50 +255,40 @@ if transcript_text and research_questions:
                     response = get_ai_response(messages)
                     if response:
                         try:
-                            # Clean the response to ensure it's valid JSON
+                            all_segment_results = []
+                            # Clean the response to ensure it's parsable
+                            response = response.replace('```json', '').replace('```', '')
                             response = response.strip()
-                            if not response.startswith('['):
-                                response = '[' + response
-                            if not response.endswith(']'):
-                                response = response + ']'
                             
-                            # Parse the JSON response
-                            initial_codes = json.loads(response)
+                            # Split by the entry delimiter
+                            entries = response.split('###CODING_ENTRY###')
                             
-                            # Validate the structure
-                            if not isinstance(initial_codes, list):
-                                raise ValueError("Response is not a list")
-                            
-                            for code in initial_codes:
+                            for entry in entries:
+                                if not entry.strip():
+                                    continue
+                                
+                                # Parse each field within the entry
+                                parts = entry.split(' ||| ')
+                                
+                                segment_data = {}
+                                for part in parts:
+                                    if ': ' in part:
+                                        key, value = part.split(': ', 1)
+                                        segment_data[key.strip().lower()] = value.strip()
+                                
+                                # Validate and add to results
                                 required_fields = ['respondent', 'text', 'code', 'notes']
-                                if not all(field in code for field in required_fields):
-                                    raise ValueError(f"Missing required fields in response: {code}")
+                                if all(field in segment_data for field in required_fields):
+                                    all_segment_results.append(segment_data)
+                                else:
+                                    st.warning(f"Skipping malformed entry in chunk {i+1}: {entry}")
                             
-                            all_results.extend(initial_codes)
+                            all_results.extend(all_segment_results)
                             
-                        except json.JSONDecodeError as e:
+                        except Exception as e:
                             st.error(f"Failed to parse AI response for chunk {i+1}. Error: {str(e)}")
                             st.text("Raw response:")
                             st.text(response)
-                            st.text("\nAttempting to fix JSON format...")
-                            
-                            # Try to fix common JSON formatting issues
-                            try:
-                                # Remove any markdown code block markers
-                                response = response.replace('```json', '').replace('```', '')
-                                # Remove any leading/trailing whitespace
-                                response = response.strip()
-                                # Ensure it's a valid JSON array
-                                if not response.startswith('['):
-                                    response = '[' + response
-                                if not response.endswith(']'):
-                                    response = response + ']'
-                                
-                                initial_codes = json.loads(response)
-                                all_results.extend(initial_codes)
-                                st.success("Successfully fixed and parsed the response!")
-                            except Exception as fix_error:
-                                st.error(f"Failed to fix JSON format: {str(fix_error)}")
                             continue
             except Exception as e:
                 st.error(f"Error processing chunk {i+1}: {str(e)}")
@@ -323,60 +321,63 @@ if transcript_text and research_questions:
                         1. Grouping related codes into themes
                         2. Identifying subthemes within each theme
                         3. Providing evidence from the transcript
-                        
-                        IMPORTANT: Your response MUST be a valid JSON array. Each object in the array must have these exact fields:
-                        {
-                            "theme": "main theme",
-                            "subtheme": "subtheme within the main theme",
-                            "codes": ["list of related codes"],
-                            "evidence": ["list of relevant quotes"],
-                            "explanation": "brief explanation of this theme"
-                        }
-                        
+
+                        IMPORTANT: Your response MUST be a plain text string, with each theme entry separated by `###THEME_ENTRY###`. Each entry must contain the following fields, delimited by `|||`:
+                        - THEME: <main theme>
+                        - SUBTHEME: <subtheme within the main theme>
+                        - CODES: <list of related codes, comma-separated>
+                        - EVIDENCE: <list of relevant quotes, comma-separated>
+                        - EXPLANATION: <brief explanation of this theme>
+
                         Example response format:
-                        [
-                            {
-                                "theme": "Learning Experience",
-                                "subtheme": "Instructional Clarity",
-                                "codes": ["Clear Instructions", "Understanding"],
-                                "evidence": ["The instructions were very clear", "I understood what to do"],
-                                "explanation": "Participants found the instructions clear and easy to follow"
-                            }
-                        ]
+                        THEME: Learning Experience ||| SUBTHEME: Instructional Clarity ||| CODES: Clear Instructions, Understanding ||| EVIDENCE: The instructions were very clear, I understood what to do, it was \"spot on\" ||| EXPLANATION: Participants found the instructions clear and easy to follow###THEME_ENTRY###
                         """
                         
                         # Convert initial coding to string for analysis
-                        coding_summary = df_initial.to_json(orient='records')
+                        coding_summary_str = df_initial.to_string(index=False)
                         
                         messages = [
                             {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"Research Questions: {research_questions}\n\nInitial Coding:\n{coding_summary}"}
+                            {"role": "user", "content": f"Research Questions: {research_questions}\n\nInitial Coding:\n{coding_summary_str}"}
                         ]
                         
                         response = get_ai_response(messages)
                         if response:
                             try:
-                                # Clean the response to ensure it's valid JSON
+                                all_theme_results = []
+                                # Clean the response to ensure it's parsable
+                                response = response.replace('```json', '').replace('```', '')
                                 response = response.strip()
-                                if not response.startswith('['):
-                                    response = '[' + response
-                                if not response.endswith(']'):
-                                    response = response + ']'
                                 
-                                # Parse the JSON response
-                                themes = json.loads(response)
+                                # Split by the entry delimiter
+                                entries = response.split('###THEME_ENTRY###')
                                 
-                                # Validate the structure
-                                if not isinstance(themes, list):
-                                    raise ValueError("Response is not a list")
-                                
-                                for theme in themes:
+                                for entry in entries:
+                                    if not entry.strip():
+                                        continue
+                                    
+                                    # Parse each field within the entry
+                                    parts = entry.split(' ||| ')
+                                    
+                                    theme_data = {}
+                                    for part in parts:
+                                        if ': ' in part:
+                                            key, value = part.split(': ', 1)
+                                            theme_data[key.strip().lower()] = value.strip()
+                                    
+                                    # Convert comma-separated strings to lists for 'codes' and 'evidence'
+                                    if 'codes' in theme_data: theme_data['codes'] = [c.strip() for c in theme_data['codes'].split(',') if c.strip()]
+                                    if 'evidence' in theme_data: theme_data['evidence'] = [e.strip() for e in theme_data['evidence'].split(',') if e.strip()]
+                                    
+                                    # Validate and add to results
                                     required_fields = ['theme', 'subtheme', 'codes', 'evidence', 'explanation']
-                                    if not all(field in theme for field in required_fields):
-                                        raise ValueError(f"Missing required fields in response: {theme}")
+                                    if all(field in theme_data for field in required_fields):
+                                        all_theme_results.append(theme_data)
+                                    else:
+                                        st.warning(f"Skipping malformed entry in theme development: {entry}")
                                 
                                 # Create DataFrame for themes
-                                df_themes = pd.DataFrame(themes)
+                                df_themes = pd.DataFrame(all_theme_results)
                                 
                                 # Display Theme Analysis
                                 st.write("### Theme Analysis")
@@ -394,10 +395,12 @@ if transcript_text and research_questions:
                                 # Apply highlights
                                 for _, row in df_themes.iterrows():
                                     for quote in row['evidence']:
-                                        if quote in highlighted_text:
+                                        # Remove potential surrounding quotes from evidence string
+                                        clean_quote = quote.strip('\'"')
+                                        if clean_quote in highlighted_text:
                                             theme = row['theme']
                                             highlight = theme_colors[theme]
-                                            highlighted_text = highlighted_text.replace(quote, f"{highlight} {quote}", 1)
+                                            highlighted_text = highlighted_text.replace(clean_quote, f"{highlight} {clean_quote}", 1)
                                 
                                 st.text_area("Highlighted Transcript", highlighted_text, height=400)
                                 
@@ -471,187 +474,80 @@ if transcript_text and research_questions:
                                     key="download_word"
                                 )
                                 
-                            except json.JSONDecodeError as e:
+                            except Exception as e:
                                 st.error(f"Failed to parse theme development response. Error: {str(e)}")
                                 st.text("Raw response:")
                                 st.text(response)
-                                st.text("\nAttempting to fix JSON format...")
-                                
-                                # Try to fix common JSON formatting issues
-                                try:
-                                    # Remove any markdown code block markers
-                                    response = response.replace('```json', '').replace('```', '')
-                                    # Remove any leading/trailing whitespace
-                                    response = response.strip()
-                                    # Ensure it's a valid JSON array
-                                    if not response.startswith('['):
-                                        response = '[' + response
-                                    if not response.endswith(']'):
-                                        response = response + ']'
-                                    
-                                    themes = json.loads(response)
-                                    st.success("Successfully fixed and parsed the response!")
-                                except Exception as fix_error:
-                                    st.error(f"Failed to fix JSON format: {str(fix_error)}")
                 except Exception as e:
                     st.error(f"Error in theme development: {str(e)}")
 
-# --- Sidebar for API Key ---
-# Use the API key from Streamlit secrets
-openai.api_key = st.secrets["OPENROUTER_API_KEY"]
-openai.base_url = "https://openrouter.ai/api/v1"
 
-# Initialize OpenAI client with OpenRouter configuration
-client = OpenAI(
-    api_key=st.secrets["OPENROUTER_API_KEY"],
-    base_url="https://openrouter.ai/api/v1",
-    default_headers={
-        "HTTP-Referer": "https://github.com/baha-ti/Qualinsight-AI",  # Your app's URL
-        "X-Title": "Qualinsight AI"  # Your app's name
-    }
-)
+def process_transcript(uploaded_file) -> Optional[List[str]]:
+    """Process uploaded transcript files (TXT, DOCX, PDF)"""
+    file_type = uploaded_file.name.split('.')[-1].lower()
+    text_content = None
 
-st.sidebar.info(f"Python executable: {sys.executable}")
+    if file_type == "txt":
+        text_content = extract_text_from_txt(uploaded_file)
+    elif file_type == "docx":
+        text_content = extract_text_from_docx(uploaded_file)
+    elif file_type == "pdf":
+        text_content = extract_text_from_pdf(uploaded_file)
+    else:
+        st.error(f"Unsupported file type: {file_type}")
+        return None
 
-# --- Upload section ---
-uploaded_file = st.file_uploader("Upload transcript (.txt, .docx, or .pdf)", type=VALID_TRANSCRIPT_TYPES)
-framework_file = st.file_uploader("Upload framework for deductive coding (.json or .txt)", type=VALID_FRAMEWORK_TYPES)
+    if text_content:
+        # Simple chunking for now, can be improved
+        chunks = chunk_text(text_content)
+        return chunks
+    return None
 
-# --- Extract text functions ---
 def extract_text_from_txt(file) -> str:
-    try:
-        return file.read().decode("utf-8")
-    except UnicodeDecodeError:
-        file.seek(0)
-        return file.read().decode("latin-1")
-
+    """Extracts text from a .txt file."""
+    return file.read().decode('utf-8')
 
 def extract_text_from_docx(file) -> str:
+    """Extracts text from a .docx file."""
     doc = Document(file)
-    return "\n".join([p.text for p in doc.paragraphs])
-
+    full_text = []
+    for para in doc.paragraphs:
+        full_text.append(para.text)
+    return '\n'.join(full_text)
 
 def extract_text_from_pdf(file) -> str:
-    with tempfile.NamedTemporaryFile(delete=True, suffix=".pdf") as temp_file:
-        temp_file.write(file.read())
-        temp_file.seek(0)
-        return pdf_extract_text(temp_file.name)
-
-
-def extract_text(file) -> str:
-    if not file:
-        return ""
+    """Extracts text from a .pdf file."""
+    with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+        tmp_file.write(file.getvalue())
+        tmp_file_path = tmp_file.name
     try:
-        file.seek(0)
-        ext = file.name.split('.')[-1].lower()
-        if ext == 'txt':
-            return extract_text_from_txt(file)
-        elif ext == 'docx':
-            return extract_text_from_docx(file)
-        elif ext == 'pdf':
-            return extract_text_from_pdf(file)
-        else:
-            st.error(f"Unsupported file type: {ext}")
-            return ""
-    except Exception as e:
-        st.error(f"Failed to extract text: {e}")
-        return ""
+        text = pdf_extract_text(tmp_file_path)
+    finally:
+        os.remove(tmp_file_path)
+    return text
 
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE) -> List[str]:
-    """Split text into smaller chunks."""
-    words = text.split()
+    """Chunks text into smaller pieces for API processing."""
     chunks = []
-    current_chunk = []
-    current_size = 0
-    
-    for word in words:
-        word_size = len(word) + 1  # +1 for space
-        if current_size + word_size > chunk_size:
-            chunks.append(' '.join(current_chunk))
-            current_chunk = [word]
-            current_size = word_size
-        else:
-            current_chunk.append(word)
-            current_size += word_size
-    
-    if current_chunk:
-        chunks.append(' '.join(current_chunk))
-    
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        if end >= len(text):
+            chunks.append(text[start:])
+            break
+        
+        # Try to find a natural break point (e.g., end of sentence)
+        break_point = text.rfind('.', start, end)
+        if break_point == -1 or break_point < start + chunk_size * 0.8: # Ensure chunk is not too small
+            break_point = end - 1 # Fallback to hard cut
+        
+        chunks.append(text[start : break_point + 1])
+        start = break_point + 1 - OVERLAP # Overlap chunks
+        if start < 0: start = 0 # Ensure start doesn't go below 0
     return chunks
 
-# --- AI-based code generator ---
 def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = None) -> List[dict]:
-    if not client:
-        st.error("Please configure a valid OpenAI API Key in the sidebar.")
-        return []
-
-    system_msg = (
-        f"You are a qualitative research assistant trained in thematic analysis. Apply mode: {mode}."
-    )
-    if framework:
-        system_msg += f" Use this framework for deductive coding: {framework}"
-
-    # Split text into chunks
-    chunks = chunk_text(text)
-    all_results = []
-    
-    for i, chunk in enumerate(chunks):
-        try:
-            with st.spinner(f"Processing chunk {i+1} of {len(chunks)}..."):
-                messages = [
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": (
-                        f"Research Questions:\n{rq}\n\n"
-                        f"Framework:\n{framework or 'None'}\n\n"
-                        f"Transcript Chunk {i+1}/{len(chunks)}:\n{chunk}"
-                    )}
-                ]
-                
-                response = get_ai_response(messages)
-                if response:
-                    st.write(f"Analysis for chunk {i+1}:")
-                    st.write(response)
-                    st.write("---")
-                    all_results.append(response)
-        except Exception as e:
-            st.error(f"Error processing chunk {i+1}: {str(e)}")
-    
-    return all_results
-
-# --- Process file and framework ---
-if uploaded_file:
-    transcript_text = extract_text(uploaded_file)
-    if not transcript_text:
-        st.error("Transcript file is empty or could not be read.")
-    else:
-        st.subheader("Transcript Preview")
-        st.text_area("Transcript", transcript_text, height=200)
-
-        # Load framework if provided
-        framework_text = None
-        if framework_file:
-            raw = extract_text(framework_file)
-            if framework_file.name.endswith(".json"):
-                try:
-                    framework_json = json.loads(raw)
-                    framework_text = json.dumps(framework_json)
-                except json.JSONDecodeError:
-                    st.warning("Framework file is not valid JSON. Using raw text.")
-                    framework_text = raw
-            else:
-                framework_text = raw
-
-        if st.button("Generate AI Codes and Highlights"):
-            with st.spinner("Analyzing with AI..."):
-                results = ai_generate_codes(transcript_text, analysis_mode, research_questions, framework_text)
-            if results:
-                st.success("Analysis complete!")
-                st.write("### Complete Analysis")
-                for i, result in enumerate(results):
-                    st.write(f"**Chunk {i+1} Analysis:**")
-                    st.write(result)
-                    st.write("---")
-            else:
-                st.warning("No results returned by the AI. Please check your input and try again.")
-        else:
-            st.warning("No results returned by the AI. Please check your input and try again.")
+    """Generates initial codes or themes using the AI."""
+    # This function is not used directly anymore, but is kept for reference or future use.
+    # The prompt building and API call logic is now directly in the main app flow for more control.
+    pass

@@ -53,7 +53,7 @@ st.set_page_config(
     page_title="Qualinsight AI",
     page_icon="🔍",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # Set up logging with more detailed format
@@ -680,40 +680,26 @@ def create_theme_distribution_chart(themes: List[str]):
     return fig
 
 def main():
-    # Sidebar navigation
-    with st.sidebar:
-        st.title("Qualinsight AI")
-        st.markdown("---")
-        
-        # Display theme legend
-        create_theme_legend()
-        
-        # Display analysis duration if available
-        if st.session_state.analysis_duration is not None:
-            st.write(f"Last Analysis Duration: {st.session_state.analysis_duration:.2f} seconds")
-        
-        # Navigation menu
-        selected = option_menu(
-            menu_title=None,
-            options=["Upload", "Analysis", "Results", "Export"],
-            icons=["upload", "search", "list", "download"],
-            default_index=0
-        )
+    st.title("Qualinsight AI")
     
-    # Main content area
-    if selected == "Upload":
-        handle_upload_tab()
-    elif selected == "Analysis":
-        handle_analysis_tab()
-    elif selected == "Results":
-        handle_results_tab()
-    elif selected == "Export":
-        handle_export_tab()
+    # Display theme legend and analysis duration at the top
+    create_theme_legend()
+    if st.session_state.get("analysis_duration") is not None:
+        st.write(f"Last Analysis Duration: {st.session_state.analysis_duration:.2f} seconds")
+    
+    st.markdown("---")
+    handle_upload_tab()
+    st.markdown("---")
+    handle_analysis_tab()
+    st.markdown("---")
+    handle_results_tab()
+    st.markdown("---")
+    handle_export_tab()
 
 @handle_errors
 def handle_upload_tab():
     """Handle the file upload tab content."""
-    st.header("Upload Transcript")
+    st.header("1. Upload Transcript")
     st.write("Upload your transcript file (TXT, DOCX, or PDF) to start the analysis.")
 
     # Remove in-browser API key input
@@ -743,6 +729,27 @@ def handle_upload_tab():
         value=st.session_state.get("research_question", ""),
         help="This question will guide the AI's analysis of your transcript."
     )
+    
+    # Add Create Codes button after research question
+    if "transcript_text" not in st.session_state or not st.session_state.transcript_text:
+        st.warning("Please upload a transcript file first.")
+    elif not st.session_state.research_question:
+        st.warning("Please enter a research question.")
+    else:
+        if st.button("Create Codes", type="primary"):
+            logger.info("Create Codes button clicked.")
+            st.session_state.analysis_results = None
+            st.session_state.analysis_complete = False
+            analysis_type = st.session_state.get("analysis_type", "Inductive")
+            task_id = start_analysis_task(
+                st.session_state.transcript_text,
+                st.session_state.research_question,
+                analysis_type,
+                st.session_state.framework
+            )
+            st.session_state.current_task = task_id
+            logger.info(f"Code creation task started, current_task set to {task_id}")
+            st.rerun()  # Force rerun to show progress immediately
 
 def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = None) -> List[dict]:
     """Call OpenAI API to generate codes for a text segment."""
@@ -1026,22 +1033,6 @@ def handle_analysis_tab():
             logger.info(f"Analysis task started, current_task set to {task_id}")
             st.rerun() # Force rerun to show progress immediately
     
-    # Button for creating codes (Stage 1) after research question input
-    if st.button("Create Codes (Stage 1)", type="primary"):
-        logger.info("Create Codes button clicked.")
-        st.session_state.analysis_results = None
-        st.session_state.analysis_complete = False
-        analysis_type = st.session_state.get("analysis_type", "Inductive")
-        task_id = start_analysis_task(
-            st.session_state.transcript_text,
-            st.session_state.research_question,
-            analysis_type,
-            st.session_state.framework
-        )
-        st.session_state.current_task = task_id
-        logger.info(f"Code creation task started, current_task set to {task_id}")
-        st.rerun()  # Force rerun to show progress immediately
-
     # Show codes by respondent (Stage 1)
     if "analysis_results" in st.session_state and st.session_state.analysis_results:
         analysis_results = st.session_state.analysis_results
@@ -1365,36 +1356,3 @@ def split_transcript_by_respondent(transcript: str) -> dict:
 # Run the main application function
 if __name__ == "__main__":
     main()
-    def main():
-        st.title("Qualinsight AI")
-    
-        # Display theme legend and analysis duration at the top
-        create_theme_legend()
-        if st.session_state.get("analysis_duration") is not None:
-            st.write(f"Last Analysis Duration: {st.session_state.analysis_duration:.2f} seconds")
-    
-        st.markdown("---")
-        handle_upload_tab()
-        st.markdown("---")
-        handle_analysis_tab()
-        st.markdown("---")
-        handle_results_tab()
-        st.markdown("---")
-        handle_export_tab()@handle_errors
-        def handle_upload_tab():
-            """Handle the file upload tab content."""
-            st.header("1. Upload Transcript")
-            # ... rest of the function@handle_errors
-            def handle_analysis_tab():
-                """Handle the analysis tab with improved async processing."""
-                logger.info("Entering handle_analysis_tab.")
-                st.header("2. Analysis")
-                # ... rest of the function@handle_errors
-                def handle_results_tab():
-                    """Handle the results tab content."""
-                    st.header("3. Results")
-                    # ... rest of the function@handle_errors
-                    def handle_export_tab():
-                        """Handle the export tab content."""
-                        st.header("4. Export")
-                        # ... rest of the function

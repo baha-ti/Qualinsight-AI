@@ -11,6 +11,9 @@ from docx import Document
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import TableStyle
+from reportlab.lib import colors
 from pdfminer.high_level import extract_text as pdf_extract_text
 import tempfile
 import time
@@ -40,9 +43,7 @@ from PIL import Image
 import pytesseract
 import re
 from pdfminer.layout import LAParams
-from reportlab.lib.units import inch
-from reportlab.platypus import TableStyle
-from reportlab.lib import colors
+import asyncio
 
 # Configure Tesseract path for Windows
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -743,7 +744,250 @@ def handle_upload_tab():
         help="This question will guide the AI's analysis of your transcript."
     )
 
-# ...existing code...
+def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = None) -> List[dict]:
+    """Call OpenAI API to generate codes for a text segment."""
+    logger.info(f"ai_generate_codes called with mode: {mode}, text length: {len(text)})")
+    api_key = get_api_key()
+    if not api_key:
+        raise QualinsightError("No valid OpenAI API key found. Please provide your API key in the sidebar/input.")
+
+    system_prompt = (
+        "You are a qualitative coding assistant. Given a research question and a text segment, "
+        "return a JSON object with a single key 'coded_segments'. This key should contain a list of objects, "
+        "each with 'text' (the exact quote) and 'code' (a short descriptive label)."
+    )
+    user_prompt = f"Research Question: {rq}\nAnalysis Mode: {mode}\nText: {text}"
+    if mode == "Framework Analysis" and framework and isinstance(framework, dict):
+        user_prompt += f"\nFramework Themes: {[t['name'] for t in framework.get('themes', [])]}"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.2,
+        "max_tokens": 1024  # Increased token limit for more detailed coding
+    }
+    
+    try:
+        response = requests.post(API_URL, headers=headers, json=data, timeout=60)
+        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"OpenAI API request failed: {e}")
+        raise AIResponseError(f"API request failed: {e}")
+
+    try:
+        result = response.json()
+        content = result["choices"][0]["message"]["content"]
+        response_json = json.loads(content)
+        validated_response = validate_ai_response(response_json, {"coded_segments": list})
+        logger.info(f"ai_generate_codes completed successfully for mode: {mode}")
+        return validated_response["coded_segments"]
+    except (json.JSONDecodeError, KeyError, IndexError, ValidationError) as e:
+        logger.error(f"Failed to parse or validate OpenAI response: {e}\nRaw content: {content}")
+        raise AIResponseError(f"Failed to parse AI response: {e}", details=content)
+
+def ai_generate_themes(codes: List[str], rq: str) -> List[Dict[str, Any]]:
+    """Call OpenAI API to generate themes from a list of codes."""
+    logger.info(f"ai_generate_themes called for {len(codes)} codes.")
+    api_key = get_api_key()
+    if not api_key:
+        raise QualinsightError("No valid OpenAI API key found.")
+
+    system_prompt = (
+        "You are a qualitative research analyst. Given a research question and a list of codes, "
+        "group them into themes. Return a JSON object with a 'themes' key, which is a list of objects. "
+        "Each object should have 'theme' (a concise name), 'description' (a brief explanation), "
+        "and 'codes' (a list of the original codes belonging to that theme)."
+    )
+    user_prompt = f"Research Question: {rq}\nCodes: {json.dumps(codes)}"
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    data = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.5, # Higher temperature for more creative grouping
+        "max_tokens": 2048
+    }
+
+    try:
+        response = requests.post(API_URL, headers=headers, json=data, timeout=120)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"OpenAI API request for theming failed: {e}")
+        raise AIResponseError(f"API request for theming failed: {e}")
+
+    try:
+        result = response.json()
+        content = result["choices"][0]["message"]["content"]
+        response_json = json.loads(content)
+        validated_response = validate_ai_response(response_json, {"themes": list})
+        logger.info("ai_generate_themes completed successfully.")
+        return validated_response["themes"]
+    except (json.JSONDecodeError, KeyError, IndexError, ValidationError) as e:
+        logger.error(f"Failed to parse or validate OpenAI theming response: {e}\nRaw content: {content}")
+        raise AIResponseError(f"Failed to parse AI theming response: {e}", details=content)
+
+async def process_chunk_async(chunk: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> Dict:
+    """Asynchronously process a single chunk to generate codes."""
+    logger.info(f"process_chunk_async called for chunk length: {len(chunk)}")
+    loop = asyncio.get_event_loop()
+    try:
+        coded_segments = await loop.run_in_executor(
+            THREAD_POOL,
+            lambda: ai_generate_codes(chunk, analysis_mode, research_question, framework)
+        )
+        logger.info(f"process_chunk_async completed for chunk length: {len(chunk)}")
+        return {"coded_segments": coded_segments}
+    except Exception as e:
+        logger.error(f"Error in ai_generate_codes thread: {e}")
+        # Propagate the error to be handled by the calling async function
+        raise
+
+async def generate_codes_async(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> AsyncGenerator[Tuple[float, Dict], None]:
+    """(Stage 1) Generate codes from transcript chunks grouped by respondent."""
+    logger.info(f"generate_codes_async started for transcript length: {len(transcript_text)}")
+    respondent_sections = split_transcript_by_respondent(transcript_text)
+    if not respondent_sections:
+        yield 1.0, {"status": "No respondents found. Check transcript formatting.", "type": "error"}
+        return
+
+    total_respondents = len(respondent_sections)
+    all_coded_segments = []
+    errors = []
+    progress_counter = 0
+    
+    # Calculate total chunks for accurate progress tracking
+    total_chunks = sum(len(chunk_text(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)) for text in respondent_sections.values())
+    if total_chunks == 0:
+        yield 1.0, {"status": "No text content to analyze.", "type": "error"}
+        return
+
+    for respondent, text in respondent_sections.items():
+        chunks = chunk_text(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
+        for i, chunk in enumerate(chunks):
+            try:
+                chunk_result = await process_chunk_async(chunk, research_question, analysis_mode, framework)
+                coded_segments_for_chunk = chunk_result.get("coded_segments", [])
+                for segment in coded_segments_for_chunk:
+                    segment["respondent"] = respondent
+                    segment["code_id"] = str(uuid.uuid4()) # Assign a unique ID to each code
+                all_coded_segments.extend(coded_segments_for_chunk)
+            except Exception as e:
+                error_msg = f"Error processing chunk {i+1} for {respondent}: {e}"
+                logger.error(error_msg, exc_info=True)
+                errors.append(error_msg)
+            
+            progress_counter += 1
+            progress = progress_counter / total_chunks
+            status = f"Coding: {respondent} chunk {i+1}/{len(chunks)} ({progress_counter}/{total_chunks})"
+            yield progress, {"status": status, "type": "progress"}
+
+    summary = f"Stage 1 Complete: Identified {len(all_coded_segments)} codes across {total_respondents} respondents."
+    if errors:
+        summary += f" Encountered {len(errors)} errors."
+        
+    final_results = {
+        "summary": summary,
+        "coded_segments": all_coded_segments,
+        "errors": errors
+    }
+    logger.info(f"generate_codes_async completed. {summary}")
+    yield 1.0, {"status": "Coding complete!", "type": "complete", "results": final_results}
+
+
+async def generate_themes_async(coded_segments: List[Dict], research_question: str) -> AsyncGenerator[Tuple[float, Dict], None]:
+    """(Stage 2) Generate themes from a list of coded segments."""
+    logger.info(f"generate_themes_async started for {len(coded_segments)} coded segments.")
+    if not coded_segments:
+        yield 1.0, {"status": "No codes to analyze.", "type": "error"}
+        return
+
+    yield 0.1, {"status": "Preparing to generate themes...", "type": "progress"}
+    
+    all_codes = [segment['code'] for segment in coded_segments if 'code' in segment]
+    unique_codes = sorted(list(set(all_codes)))
+
+    yield 0.3, {"status": f"Generating themes from {len(unique_codes)} unique codes...", "type": "progress"}
+
+    try:
+        loop = asyncio.get_event_loop()
+        themes_result = await loop.run_in_executor(
+            THREAD_POOL,
+            lambda: ai_generate_themes(unique_codes, research_question)
+        )
+        yield 0.8, {"status": "Mapping themes back to codes...", "type": "progress"}
+
+        # Create a mapping from code to theme
+        code_to_theme_map = {}
+        for theme_data in themes_result:
+            theme_name = theme_data.get("theme")
+            for code in theme_data.get("codes", []):
+                code_to_theme_map[code] = theme_name
+
+        # Add theme information to each coded segment
+        for segment in coded_segments:
+            segment["theme"] = code_to_theme_map.get(segment.get("code"))
+
+        summary = f"Stage 2 Complete: Identified {len(themes_result)} themes."
+        final_results = {
+            "summary": summary,
+            "themes": themes_result,
+            "coded_segments_with_themes": coded_segments
+        }
+        logger.info(f"generate_themes_async completed. {summary}")
+        yield 1.0, {"status": "Theming complete!", "type": "complete", "results": final_results}
+
+    except Exception as e:
+        error_msg = f"Error during theme generation: {e}"
+        logger.error(error_msg, exc_info=True)
+        yield 1.0, {"status": error_msg, "type": "error"}
+
+
+def start_analysis_task(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> str:
+    """Starts the analysis as an asynchronous task and returns its ID."""
+    task_id = str(uuid.uuid4()) # Unique ID for the task
+    
+    # Create a queue specifically for this task's progress updates
+    progress_queue = Queue()
+
+    # Pass the progress_queue to the async analysis function
+    async def analysis_coroutine():
+        async for progress, data_dict in generate_codes_async(transcript_text, research_question, analysis_mode, framework):
+            if data_dict["type"] == "progress":
+                progress_queue.put(("progress", progress, data_dict["status"]))
+            elif data_dict["type"] == "complete":
+                coded_segments = data_dict["results"]["coded_segments"]
+                async for progress, data_dict in generate_themes_async(coded_segments, research_question):
+                    if data_dict["type"] == "progress":
+                        progress_queue.put(("progress", progress, data_dict["status"]))
+                    elif data_dict["type"] == "complete":
+                        progress_queue.put(("complete_data", data_dict["results"]))
+                        break
+                    elif data_dict["type"] == "error":
+                        progress_queue.put(("error", data_dict["status"]))
+                        break
+                # Ensure final state is always reported to the main thread
+                # (This is handled by 'complete_data' or 'error' messages)
+
+    task_manager.start_task(task_id, analysis_coroutine(), progress_queue)
+    
+    # Initialize session state for this specific task's progress
+    st.session_state[f"progress_{task_id}"] = 0.0
+    st.session_state[f"status_{task_id}"] = "Starting analysis..."
+    
+    st.session_state.analysis_start_time = time.time()
+    st.session_state.analysis_duration = None # Reset duration for new analysis
+
+    return task_id
 
 @handle_errors
 def handle_analysis_tab():
@@ -801,47 +1045,30 @@ def handle_analysis_tab():
     # Show codes by respondent (Stage 1)
     if "analysis_results" in st.session_state and st.session_state.analysis_results:
         analysis_results = st.session_state.analysis_results
-        codes_by_respondent = analysis_results.get("codes_by_respondent", {})
-        if codes_by_respondent:
+        coded_segments = analysis_results.get("coded_segments_with_themes", [])
+        if coded_segments:
             st.subheader("Stage 1: Codes by Respondent")
-            for respondent, codes in codes_by_respondent.items():
+            for respondent in set(segment.get("respondent") for segment in coded_segments):
                 st.markdown(f"**{respondent}**")
-                if codes:
-                    df = pd.DataFrame(codes)
-                    display_cols = [col for col in df.columns if col in ["code", "text"]]
-                    if display_cols:
-                        st.dataframe(df[display_cols])
-                    else:
-                        st.dataframe(df)
+                respondent_segments = [segment for segment in coded_segments if segment.get("respondent") == respondent]
+                df = pd.DataFrame(respondent_segments)
+                display_cols = [col for col in df.columns if col in ["code", "text"]]
+                if display_cols:
+                    st.dataframe(df[display_cols])
                 else:
-                    st.info(f"No codes identified for {respondent}.")
-
-        # Button for creating themes (Stage 2)
-        if st.button("Create Themes (Stage 2)", type="primary"):
-            logger.info("Create Themes button clicked.")
-            # Add a 'theme' column to each respondent's codes (simulate theme creation)
-            for respondent, codes in codes_by_respondent.items():
-                for code in codes:
-                    code["theme"] = code.get("theme", "Theme Placeholder")
-            st.session_state.themes_created = True
-            st.success("Themes created and added to codes.")
-            st.rerun()
-
-        # Show codes with themes if created
-        if st.session_state.get("themes_created"):
+                    st.dataframe(df)
             st.subheader("Stage 2: Codes with Themes by Respondent")
-            for respondent, codes in codes_by_respondent.items():
+            for respondent in set(segment.get("respondent") for segment in coded_segments):
                 st.markdown(f"**{respondent}**")
-                if codes:
-                    df = pd.DataFrame(codes)
-                    display_cols = [col for col in df.columns if col in ["code", "text", "theme"]]
-                    if display_cols:
-                        st.dataframe(df[display_cols])
-                    else:
-                        st.dataframe(df)
+                respondent_segments = [segment for segment in coded_segments if segment.get("respondent") == respondent]
+                df = pd.DataFrame(respondent_segments)
+                display_cols = [col for col in df.columns if col in ["code", "text", "theme"]]
+                if display_cols:
+                    st.dataframe(df[display_cols])
                 else:
-                    st.info(f"No codes identified for {respondent}.")
-    # ...existing code...
+                    st.dataframe(df)
+        else:
+            st.info("No codes identified.")
 
 @handle_errors
 def handle_results_tab():
@@ -854,12 +1081,12 @@ def handle_results_tab():
 
     analysis_results = st.session_state.analysis_results
 
-    if not isinstance(analysis_results, dict) or "themes" not in analysis_results or "coded_segments" not in analysis_results:
+    if not isinstance(analysis_results, dict) or "themes" not in analysis_results or "coded_segments_with_themes" not in analysis_results:
         st.error("Invalid analysis results format.")
         return
 
     themes = analysis_results.get("themes", [])
-    coded_segments = analysis_results.get("coded_segments", [])
+    coded_segments = analysis_results.get("coded_segments_with_themes", [])
 
     if not themes and not coded_segments:
         st.info("Analysis completed, but no themes or coded segments were identified.")
@@ -869,7 +1096,8 @@ def handle_results_tab():
     st.subheader("Identified Themes")
     if themes:
         for i, theme in enumerate(themes):
-            st.markdown(f"**{i+1}. {theme}**")
+            st.markdown(f"**{i+1}. {theme['theme']}**")
+            st.markdown(theme['description'])
     else:
         st.info("No themes identified.")
 
@@ -901,51 +1129,17 @@ def handle_results_tab():
             fig = create_theme_distribution_chart(segment_themes)
             st.plotly_chart(fig, use_container_width=True)
 
-    # Show codes by respondent (Stage 1)
-    codes_by_respondent = analysis_results.get("codes_by_respondent", {})
-    if codes_by_respondent:
-        st.subheader("Stage 1: Codes by Respondent")
-        for respondent, codes in codes_by_respondent.items():
-            st.markdown(f"**{respondent}**")
-            if codes:
-                df = pd.DataFrame(codes)
-                # Only show columns for code and transcript
-                display_cols = [col for col in df.columns if col in ["code", "text"]]
-                if display_cols:
-                    st.dataframe(df[display_cols])
-                else:
-                    st.dataframe(df)
-            else:
-                st.info(f"No codes identified for {respondent}.")
-    else:
-        st.info("No codes by respondent available.")
-
-    # Show codes with themes if created
-    if st.session_state.get("themes_created"):
-        st.subheader("Stage 2: Codes with Themes by Respondent")
-        for respondent, codes in codes_by_respondent.items():
-            st.markdown(f"**{respondent}**")
-            if codes:
-                df = pd.DataFrame(codes)
-                display_cols = [col for col in df.columns if col in ["code", "text", "theme"]]
-                if display_cols:
-                    st.dataframe(df[display_cols])
-                else:
-                    st.dataframe(df)
-            else:
-                st.info(f"No codes identified for {respondent}.")
-
 def display_analysis_results(analysis_results: Dict):
     """Helper function to display analysis results from handle_analysis_tab."""
     st.subheader("Analysis Summary")
     st.write(analysis_results.get("summary", "No summary provided."))
 
     themes = analysis_results.get("themes", [])
-    coded_segments = analysis_results.get("coded_segments", [])
+    coded_segments = analysis_results.get("coded_segments_with_themes", [])
 
     if themes:
         st.subheader("Identified Themes")
-        st.markdown("-" + "\n-".join(themes))
+        st.markdown("-" + "\n-".join([theme['theme'] for theme in themes]))
 
     if coded_segments:
         st.subheader("First 5 Coded Segments (for quick review)")
@@ -964,7 +1158,7 @@ def handle_export_tab():
         return
 
     analysis_results = st.session_state.analysis_results
-    coded_segments = analysis_results.get("coded_segments", [])
+    coded_segments = analysis_results.get("coded_segments_with_themes", [])
 
     if not coded_segments:
         st.warning("No coded segments to export.")
@@ -1146,194 +1340,6 @@ def load_framework(file) -> Dict:
     except Exception as e:
         raise FileProcessingError(f"Error loading framework: {e}")
 
-def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = None) -> List[dict]:
-    """Call OpenAI API to generate codes for a text segment."""
-    logger.info(f"ai_generate_codes called with mode: {mode}, text length: {len(text)})")
-    api_key = get_api_key()
-    if not api_key:
-        raise Exception("No valid OpenAI API key found. Please provide your API key in the sidebar/input.")
-
-    system_prompt = "You are a qualitative coding assistant. Given a research question and a text segment, return a JSON with a list of coded_segments, each with 'text', 'code', 'theme', and 'notes'."
-    user_prompt = f"Research Question: {rq}\nAnalysis Mode: {mode}\nText: {text}"
-    if mode == "Framework Analysis" and framework and isinstance(framework, dict):
-        user_prompt += f"\nFramework Themes: {[t['name'] for t in framework.get('themes', [])]}"
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "temperature": 0.2,
-        "max_tokens": 512
-    }
-    response = requests.post(API_URL, headers=headers, json=data)
-    if response.status_code != 200:
-        logger.error(f"OpenAI API error: {response.status_code} {response.text}")
-        raise Exception(f"OpenAI API error: {response.status_code} {response.text}")
-    result = response.json()
-    try:
-        content = result["choices"][0]["message"]["content"]
-        # Try to parse the content as JSON
-        response_json = json.loads(content)
-        validated_response = validate_ai_response(response_json, {"coded_segments": list})
-        logger.info(f"ai_generate_codes completed for mode: {mode}")
-        return validated_response["coded_segments"]
-    except Exception as e:
-        logger.error(f"Failed to parse OpenAI response: {e}\nRaw content: {content}")
-        raise Exception(f"Failed to parse OpenAI response: {e}\nRaw content: {content}")
-
-@cache_result(ttl=CACHE_TTL)
-def analyze_transcript(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> Dict:
-    """Analyze the transcript using the selected AI model and mode."""
-    logger.info(f"Starting transcript analysis for mode: {analysis_mode}, RQ: {research_question}")
-    
-    chunks = chunk_text(transcript_text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
-    all_coded_segments = []
-    all_themes = set()
-    
-    total_chunks = len(chunks)
-    for i, chunk in enumerate(chunks):
-        # Simulate AI processing each chunk
-        # In a real scenario, this would be an API call to a coding model
-        coded_segments_for_chunk = ai_generate_codes(chunk, analysis_mode, research_question, framework)
-        all_coded_segments.extend(coded_segments_for_chunk)
-        for segment in coded_segments_for_chunk:
-            if "theme" in segment:
-                all_themes.add(segment["theme"])
-        
-        # Update progress and status (this is where the UI update would happen)
-        progress = (i + 1) / total_chunks
-        status = f"Analyzing chunk {i+1}/{total_chunks}..."
-        logger.info(f"Progress: {progress:.2f}, Status: {status}")
-
-    merged_segments = merge_coded_chunks(all_coded_segments)
-
-    # Create a dummy summary
-    summary = f"Analysis complete for research question: '{research_question}'. Identified {len(all_themes)} themes and {len(merged_segments)} coded segments."
-
-    return {
-        "summary": summary,
-        "themes": sorted(list(all_themes)),
-        "coded_segments": merged_segments
-    }
-
-async def process_chunk_async(chunk: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> Dict:
-    """Asynchronously process a single chunk using AI."""
-    logger.info(f"process_chunk_async called for chunk length: {len(chunk)}")
-    # Simulate AI API call, replace with actual API interaction
-    # This part should ideally use an aiohttp call to OpenRouter or similar
-    await asyncio.sleep(0.1) # Simulate async work
-
-    # Call the synchronous ai_generate_codes in a thread pool executor
-    # This is crucial because ai_generate_codes might be blocking (e.g., if it makes synchronous HTTP requests)
-    loop = asyncio.get_event_loop()
-    coded_segments = await loop.run_in_executor(
-        THREAD_POOL,
-        lambda: ai_generate_codes(chunk, analysis_mode, research_question, framework)
-    )
-    logger.info(f"process_chunk_async completed for chunk length: {len(chunk)}")
-    return {"coded_segments": coded_segments}
-
-async def process_transcript_async(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> AsyncGenerator[Tuple[float, Dict], None]:
-    """
-    Stage 1: Identify codes from transcript chunks grouped by respondent names.
-    Stage 2: Identify themes based on the codes developed.
-    """
-    logger.info(f"process_transcript_async started for transcript length: {len(transcript_text)}")
-    respondent_sections = split_transcript_by_respondent(transcript_text)
-    total_respondents = len(respondent_sections)
-    all_codes_by_respondent = {}
-    all_coded_segments = []
-    all_themes = set()
-    errors = []
-    progress_counter = 0
-    total_chunks = sum(len(chunk_text(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)) for text in respondent_sections.values())
-    if total_chunks == 0:
-        yield 1.0, {"status": "No valid respondent sections or chunks found.", "type": "error"}
-        return
-    # Stage 1: Codes by respondent
-    for respondent, text in respondent_sections.items():
-        respondent_codes = []
-        chunks = chunk_text(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
-        for i, chunk in enumerate(chunks):
-            try:
-                chunk_result = await process_chunk_async(chunk, research_question, analysis_mode, framework)
-                coded_segments_for_chunk = chunk_result.get("coded_segments", [])
-                for segment in coded_segments_for_chunk:
-                    segment["respondent"] = respondent
-                respondent_codes.extend(coded_segments_for_chunk)
-                all_coded_segments.extend(coded_segments_for_chunk)
-            except Exception as e:
-                error_msg = f"Error processing chunk {i+1} for respondent {respondent}: {e}"
-                logger.error(error_msg, exc_info=True)
-                errors.append(error_msg)
-            progress_counter += 1
-            progress = progress_counter / total_chunks
-            status = f"Coding: {respondent} chunk {i+1}/{len(chunks)} ({progress_counter}/{total_chunks})"
-            yield progress, {"status": status, "type": "progress"}
-        all_codes_by_respondent[respondent] = respondent_codes
-    # Stage 2: Identify themes from all codes
-    # (Assume each coded segment has a 'theme' field)
-    for segment in all_coded_segments:
-        if "theme" in segment:
-            all_themes.add(segment["theme"])
-    merged_segments = merge_coded_chunks(all_coded_segments)
-    summary = f"Stage 1: Codes identified for {total_respondents} respondents. Stage 2: Identified {len(all_themes)} themes from {len(merged_segments)} coded segments."
-    if errors:
-        summary += f" Encountered {len(errors)} errors. See 'errors' in results."
-    final_results = {
-        "summary": summary,
-        "themes": sorted(list(all_themes)),
-        "coded_segments": merged_segments,
-        "codes_by_respondent": all_codes_by_respondent,
-        "errors": errors
-    }
-    logger.info(f"process_transcript_async completed. Final results: {final_results['summary']}")
-    yield 1.0, {"status": "Analysis complete!", "type": "complete", "results": final_results}
-
-def start_analysis_task(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> str:
-    """Starts the analysis as an asynchronous task and returns its ID."""
-    task_id = str(uuid.uuid4()) # Unique ID for the task
-    
-    # Create a queue specifically for this task's progress updates
-    progress_queue = Queue()
-
-    # Pass the progress_queue to the async analysis function
-    async def analysis_coroutine():
-        async for progress, data_dict in process_transcript_async(transcript_text, research_question, analysis_mode, framework):
-            if data_dict["type"] == "progress":
-                progress_queue.put(("progress", progress, data_dict["status"]))
-            elif data_dict["type"] == "complete":
-                progress_queue.put(("complete_data", data_dict["results"]))
-                break
-            elif data_dict["type"] == "error":
-                progress_queue.put(("error", data_dict["status"]))
-                break
-        # Ensure final state is always reported to the main thread
-        # (This is handled by 'complete_data' or 'error' messages)
-
-    task_manager.start_task(task_id, analysis_coroutine(), progress_queue)
-    
-    # Initialize session state for this specific task's progress
-    st.session_state[f"progress_{task_id}"] = 0.0
-    st.session_state[f"status_{task_id}"] = "Starting analysis..."
-    
-    st.session_state.analysis_start_time = time.time()
-    st.session_state.analysis_duration = None # Reset duration for new analysis
-
-    return task_id
-
-# Run the main application function
-if __name__ == "__main__":
-    main()
-
-import re
-
 def split_transcript_by_respondent(transcript: str) -> dict:
     """Split transcript into sections by respondent name. Returns a dict {respondent: text}."""
     respondent_sections = {}
@@ -1355,3 +1361,40 @@ def split_transcript_by_respondent(transcript: str) -> dict:
     if current_respondent and current_text:
         respondent_sections[current_respondent] = '\n'.join(current_text).strip()
     return respondent_sections
+
+# Run the main application function
+if __name__ == "__main__":
+    main()
+    def main():
+        st.title("Qualinsight AI")
+    
+        # Display theme legend and analysis duration at the top
+        create_theme_legend()
+        if st.session_state.get("analysis_duration") is not None:
+            st.write(f"Last Analysis Duration: {st.session_state.analysis_duration:.2f} seconds")
+    
+        st.markdown("---")
+        handle_upload_tab()
+        st.markdown("---")
+        handle_analysis_tab()
+        st.markdown("---")
+        handle_results_tab()
+        st.markdown("---")
+        handle_export_tab()@handle_errors
+        def handle_upload_tab():
+            """Handle the file upload tab content."""
+            st.header("1. Upload Transcript")
+            # ... rest of the function@handle_errors
+            def handle_analysis_tab():
+                """Handle the analysis tab with improved async processing."""
+                logger.info("Entering handle_analysis_tab.")
+                st.header("2. Analysis")
+                # ... rest of the function@handle_errors
+                def handle_results_tab():
+                    """Handle the results tab content."""
+                    st.header("3. Results")
+                    # ... rest of the function@handle_errors
+                    def handle_export_tab():
+                        """Handle the export tab content."""
+                        st.header("4. Export")
+                        # ... rest of the function

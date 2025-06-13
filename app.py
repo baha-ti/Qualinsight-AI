@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import random
 import io
-# from openai import OpenAI # Not directly used for OpenRouter
+from openai import OpenAI
 import json
 from io import BytesIO
 from typing import List, Optional, Dict, Any, Tuple, AsyncGenerator
@@ -14,7 +14,6 @@ from reportlab.lib.styles import getSampleStyleSheet
 from pdfminer.high_level import extract_text as pdf_extract_text
 import tempfile
 import time
-# import openai # Not directly used for OpenRouter
 import requests
 import os
 import numpy as np
@@ -25,7 +24,6 @@ import aiohttp
 from functools import lru_cache, wraps
 import hashlib
 import logging
-from openai import OpenAI
 import fitz  # PyMuPDF
 import tiktoken
 from concurrent.futures import ThreadPoolExecutor
@@ -311,65 +309,38 @@ def show_error_page(error: Exception):
     st.info("Please try again or contact support.")
 
 def validate_api_key(api_key: str) -> bool:
-    """Validate the format of the provided API key."""
-    # Basic validation: check if it's a non-empty string and starts with 'sk-'
+    """Validate the OpenAI API key format."""
     return isinstance(api_key, str) and api_key.strip() != "" and api_key.startswith("sk-")
 
 def get_api_key() -> Optional[str]:
-    """Retrieve the API key from Streamlit secrets or environment variables."""
+    """Get the OpenAI API key from Streamlit session state, environment variables, or Streamlit secrets."""
     api_key = None
-    try:
-        # Attempt to retrieve from Streamlit secrets
-        if "OPENAI_API_KEY" in st.secrets:
-            api_key = st.secrets["OPENAI_API_KEY"]
-            logger.info("API key found in Streamlit secrets.")
-        elif "OPENAI_API_KEY" in os.environ:
-            api_key = os.environ.get("OPENAI_API_KEY")
-            logger.info("API key found in environment variables.")
-        elif "OPENROUTER_API_KEY" in st.secrets:
-            api_key = st.secrets["OPENROUTER_API_KEY"]
-            logger.info("OpenRouter API key found in Streamlit secrets (for backward compatibility).")
-        elif "OPENROUTER_API_KEY" in os.environ:
-            api_key = os.environ.get("OPENROUTER_API_KEY")
-            logger.info("OpenRouter API key found in environment variables (for backward compatibility).")
-        else:
-            logger.warning("Neither OPENAI_API_KEY nor OPENROUTER_API_KEY found in Streamlit secrets or environment variables.")
-            return None
-
-        if not validate_api_key(api_key):
-            logger.error("Retrieved API key is invalid.")
-            return None
-            
-    except Exception as e:
-        logger.error(f"Error retrieving API key: {e}")
+    
+    # 1. Try to get API key from Streamlit session state (for in-browser input)
+    if "openai_api_key_input" in st.session_state and st.session_state.openai_api_key_input:
+        api_key = st.session_state.openai_api_key_input
+        logger.info("API key found in Streamlit session state (in-browser input).")
+    # 2. Try to get API key from Streamlit secrets
+    elif "OPENAI_API_KEY" in st.secrets:
+        api_key = st.secrets["OPENAI_API_KEY"]
+        logger.info("API key found in Streamlit secrets.")
+    # 3. Try to get API key from environment variables
+    elif "OPENAI_API_KEY" in os.environ:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        logger.info("API key found in environment variables.")
+    else:
+        logger.warning("OPENAI_API_KEY not found in Streamlit session state, secrets, or environment variables.")
+    
+    if not validate_api_key(api_key):
+        logger.warning("Invalid OpenAI API key format.")
         return None
     
     return api_key
 
 def show_api_key_guidance():
-    st.warning("API Key Not Configured")
-    st.markdown("""
-    To use this application, you need to provide your OpenAI API key. 
-    Please configure it using one of the following methods:
-
-    1.  **Streamlit Secrets (Recommended for Deployment):**
-        Create a `.streamlit/secrets.toml` file in your project root with the following content:
-        ```toml
-        OPENAI_API_KEY="your_openai_api_key_here"
-        ```
-        **Note:** Do not commit `secrets.toml` to public GitHub repositories.
-
-    2.  **Environment Variable (Recommended for Local Development):**
-        Set the `OPENAI_API_KEY` environment variable before running the app:
-        ```bash
-        export OPENAI_API_KEY="your_openai_api_key_here"
-        streamlit run app.py
-        ```
-        On Windows (Command Prompt):
-        ```cmd
-        set OPENAI_API_KEY="your_openai_api_key_here"
-        streamlit run app.py
-        ```
+    """Show guidance for setting up the OpenAI API key (simplified for in-browser input)."""
+    st.info("""
+    To use this application, please enter your OpenAI API key above or configure it via `.streamlit/secrets.toml` or environment variables.
     You can obtain your OpenAI API key from the [OpenAI website](https://platform.openai.com/account/api-keys).
     """)
 
@@ -553,68 +524,65 @@ async def process_large_file(file) -> str:
 
 @handle_errors
 async def get_ai_response_async(messages: List[Dict], stream: bool = True) -> AsyncGenerator[str, None]:
-    """Get streaming AI response from OpenRouter API."""
+    """Get streaming AI response from OpenAI API."""
     api_key = get_api_key()
     if not api_key:
-        raise ValidationError("API key is missing or invalid. Please configure it.")
+        raise AIResponseError("OpenAI API key not found. Please configure your API key.")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:8501", # Replace with your app's URL
-        "X-Title": "Qualinsight AI",
+        "Content-Type": "application/json"
     }
 
-    payload = {
-        "model": MODEL,
-        "messages": messages,
-        "stream": stream,
-    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json={
+                    "model": "gpt-4-turbo-preview",
+                    "messages": messages,
+                    "stream": stream,
+                    "temperature": 0.7
+                },
+                timeout=30
+            ) as response:
+                if response.status == 401:
+                    raise AIResponseError("Unauthorized: Invalid OpenAI API key. Please check your configuration.")
+                elif response.status == 429:
+                    raise AIResponseError("Rate limit exceeded: Too many requests to OpenAI API. Please try again later.")
+                elif response.status != 200:
+                    raise AIResponseError(f"OpenAI API request failed: {response.status}")
 
-    timeout_seconds = 300  # 5 minutes for API response
+                if stream:
+                    async for line in response.content:
+                        if line:
+                            try:
+                                line = line.decode('utf-8').strip()
+                                if line.startswith('data: '):
+                                    data = line[6:]  # Remove 'data: ' prefix
+                                    if data == '[DONE]':
+                                        break
+                                    try:
+                                        chunk = json.loads(data)
+                                        if 'choices' in chunk and len(chunk['choices']) > 0:
+                                            delta = chunk['choices'][0].get('delta', {})
+                                            if 'content' in delta:
+                                                yield delta['content']
+                                    except json.JSONDecodeError:
+                                        continue
+                            except Exception as e:
+                                logger.error(f"Error processing stream line: {e}")
+                                continue
+                else:
+                    result = await response.json()
+                    if 'choices' in result and len(result['choices']) > 0:
+                        yield result['choices'][0]['message']['content']
 
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as session:
-            async with session.post(API_URL, headers=headers, json=payload) as response:
-                response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
-                
-                async for chunk in response.content.iter_any():
-                    try:
-                        # OpenRouter sends SSEs (Server-Sent Events) which start with 'data: '
-                        # We need to parse each line and extract the JSON part.
-                        for line in chunk.decode('utf-8').splitlines():
-                            if line.startswith("data:"):
-                                json_data = line[len("data:"):].strip()
-                                if json_data == "[DONE]":
-                                    break
-                                
-                                data = json.loads(json_data)
-                                if "choices" in data and data["choices"] and "delta" in data["choices"][0] and "content" in data["choices"][0]["delta"]:
-                                    content = data["choices"][0]["delta"]["content"]
-                                    if content:
-                                        yield content
-                    except json.JSONDecodeError:
-                        logger.warning(f"JSONDecodeError: Could not decode line: {line.strip()}")
-                        continue
-
-    except aiohttp.ClientError as e:
-        error_message = f"OpenRouter API request failed: {e}"
-        if isinstance(e, aiohttp.ClientResponseError):
-            if e.status == 401:
-                error_message = "Unauthorized: Invalid OpenRouter API key. Please check your configuration."
-            elif e.status == 429:
-                error_message = "Rate limit exceeded: Too many requests to OpenRouter API. Please try again later."
-            else:
-                try:
-                    response_text = await response.text()
-                    error_message += f"\nResponse: {response_text}"
-                except Exception:
-                    pass
-        raise AIResponseError(error_message, traceback.format_exc())
-    except asyncio.TimeoutError:
-        raise AIResponseError("OpenRouter API request timed out.", traceback.format_exc())
-    except Exception as e:
-        raise AIResponseError(f"An unexpected error occurred during API call: {e}", traceback.format_exc())
+        except asyncio.TimeoutError:
+            raise AIResponseError("OpenAI API request timed out.", traceback.format_exc())
+        except Exception as e:
+            raise AIResponseError(f"Error during OpenAI API request: {str(e)}", traceback.format_exc())
 
 def get_ai_response(messages: List[Dict], stream: bool = True):
     """Synchronous wrapper for asynchronous AI response retrieval."""
@@ -747,17 +715,36 @@ def main():
 
 @handle_errors
 def handle_upload_tab():
-    """Handle the upload tab content."""
+    """Handle the file upload tab content."""
     st.header("Upload Transcript")
-    
-    # File uploader
-    uploaded_file = st.file_uploader(
-        "Upload your transcript (TXT, DOCX, or PDF)",
-        type=VALID_TRANSCRIPT_TYPES,
-        help=f"Max file size: {MAX_FILE_SIZE / (1024 * 1024):.0f} MB"
+    st.write("Upload your transcript file (TXT, DOCX, or PDF) to start the analysis.")
+
+    # Input for OpenAI API Key (new)
+    current_api_key_in_session = st.session_state.get("openai_api_key_input", "")
+    initial_api_key_from_sources = get_api_key()
+
+    # If an API key is already valid from other sources, use that as the initial value
+    # Otherwise, use what's in session state (if user typed something previously)
+    # This ensures user's typed input takes precedence if it exists
+    display_value = current_api_key_in_session if current_api_key_in_session else (initial_api_key_from_sources or "")
+
+    st.session_state.openai_api_key_input = st.text_input(
+        "OpenAI API Key",
+        type="password",
+        value=display_value,
+        help="Enter your OpenAI API key. It will not be stored permanently."
     )
 
-    if uploaded_file:
+    # After user input, check if a valid API key is now available
+    valid_api_key_exists = get_api_key() # This will now prioritize session state input
+
+    if not valid_api_key_exists:
+        show_api_key_guidance()
+    else:
+        st.success("OpenAI API key configured successfully!")
+
+    uploaded_file = st.file_uploader("Choose a file", type=["txt", "docx", "pdf"])
+    if uploaded_file is not None:
         process_transcript(uploaded_file)
 
     # Research Question input
@@ -814,8 +801,10 @@ def handle_analysis_tab():
         # Retrieve the progress queue
         progress_queue = task_manager.get_progress_queue(task_id)
         if progress_queue:
-            # Process all messages in the queue in this rerun cycle
+            # Check if there are any new messages in the queue
+            queue_had_messages = False
             while not progress_queue.empty():
+                queue_had_messages = True
                 try:
                     message_type, *data = progress_queue.get_nowait()
                     if message_type == "progress":
@@ -836,12 +825,10 @@ def handle_analysis_tab():
                         st.session_state.analysis_complete = True
                         analysis_complete = True # Update local variable
                 except Exception as e:
-                    logger.error(f"Error processing queue message for task {task_id}: {e}")
+                    logger.error(f"Error processing queue message for task {task_id}: {e}", exc_info=True)
                     # Don't re-raise, allow the app to continue
 
-        logger.info(f"Monitoring task {task_id}. Progress: {progress:.1%}, Status: {status}, Complete: {analysis_complete}")
-
-        with st.status("Analysis Status", expanded=True) as status_box:
+            # Update the progress bar and status text again after processing queue
             progress_bar = st.progress(progress)
             status_text = st.empty()
 
@@ -867,13 +854,16 @@ def handle_analysis_tab():
                 if "current_task" in st.session_state:
                     del st.session_state.current_task
                 st.session_state.analysis_complete = False # Reset for next run
-                st.session_state.analysis_results = None   # Reset for next run
+                st.session_state.analysis_results = None   # Reset for new analysis
                 logger.info(f"Task {task_id} UI elements cleaned up.")
 
-            else:
-                # Only rerun if not complete
+            elif not analysis_complete:
+                # If the task is not complete and the queue is empty, wait a bit and rerun
+                # This prevents excessive reruns when no new data is available
+                if not queue_had_messages and not task_manager.is_complete(task_id):
+                    time.sleep(0.5) # Increased delay to prevent excessive reruns
+                
                 logger.info(f"Task {task_id} not yet complete. Forcing rerun.")
-                time.sleep(0.1) # Small delay to prevent excessive reruns
                 st.rerun()
 
 @handle_errors
@@ -1147,6 +1137,7 @@ def load_framework(file) -> Dict:
 
 def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = None) -> List[dict]:
     """Simulate AI generating codes for a text segment."""
+    logger.info(f"ai_generate_codes called with mode: {mode}, text length: {len(text)}")
     # This is a placeholder. Replace with actual AI call.
     # For demonstration, generate random themes and codes
     possible_themes = list(THEME_COLORS.keys())
@@ -1199,6 +1190,7 @@ def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = 
     try:
         validated_response = validate_ai_response(response_structure, {"coded_segments": list})
         # Further validate each segment within coded_segments if needed
+        logger.info(f"ai_generate_codes completed for mode: {mode}")
         return validated_response["coded_segments"]
     except AIResponseError as e:
         logger.error(f"AI response validation failed: {e.message}")
@@ -1241,6 +1233,7 @@ def analyze_transcript(transcript_text: str, research_question: str, analysis_mo
 
 async def process_chunk_async(chunk: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> Dict:
     """Asynchronously process a single chunk using AI."""
+    logger.info(f"process_chunk_async called for chunk length: {len(chunk)}")
     # Simulate AI API call, replace with actual API interaction
     # This part should ideally use an aiohttp call to OpenRouter or similar
     await asyncio.sleep(0.1) # Simulate async work
@@ -1252,16 +1245,19 @@ async def process_chunk_async(chunk: str, research_question: str, analysis_mode:
         THREAD_POOL,
         lambda: ai_generate_codes(chunk, analysis_mode, research_question, framework)
     )
+    logger.info(f"process_chunk_async completed for chunk length: {len(chunk)}")
     return {"coded_segments": coded_segments}
 
 async def process_transcript_async(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> AsyncGenerator[Tuple[float, Dict], None]:
     """Process the transcript asynchronously with progress updates."""
+    logger.info(f"process_transcript_async started for transcript length: {len(transcript_text)}")
     chunks = chunk_text(transcript_text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
     total_chunks = len(chunks)
     all_coded_segments = []
     all_themes = set()
 
     for i, chunk in enumerate(chunks):
+        logger.info(f"Processing chunk {i+1}/{total_chunks} in process_transcript_async.")
         try:
             chunk_result = await process_chunk_async(chunk, research_question, analysis_mode, framework)
             coded_segments_for_chunk = chunk_result.get("coded_segments", [])
@@ -1272,9 +1268,10 @@ async def process_transcript_async(transcript_text: str, research_question: str,
             
             progress = (i + 1) / total_chunks
             status = f"Analyzing chunk {i+1}/{total_chunks}..."
+            logger.info(f"Yielding progress: {progress:.2f}, status: {status}")
             yield progress, {"status": status, "type": "progress"}
         except Exception as e:
-            logger.error(f"Error processing chunk {i+1}: {e}")
+            logger.error(f"Error processing chunk {i+1}: {e}", exc_info=True)
             yield -1.0, {"status": f"Error processing chunk {i+1}: {e}", "type": "error"}
             return # Stop processing on error
 
@@ -1286,6 +1283,7 @@ async def process_transcript_async(transcript_text: str, research_question: str,
         "themes": sorted(list(all_themes)),
         "coded_segments": merged_segments
     }
+    logger.info(f"process_transcript_async completed. Final results: {final_results["summary"]}")
     yield 1.0, {"status": "Analysis complete!", "type": "complete", "results": final_results}
 
 def start_analysis_task(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> str:

@@ -40,6 +40,9 @@ from PIL import Image
 import pytesseract
 import re
 from pdfminer.layout import LAParams
+from reportlab.lib.units import inch
+from reportlab.platypus import TableStyle
+from reportlab.lib import colors
 
 # Configure Tesseract path for Windows
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -313,28 +316,21 @@ def validate_api_key(api_key: str) -> bool:
     return isinstance(api_key, str) and api_key.strip() != "" and api_key.startswith("sk-")
 
 def get_api_key() -> Optional[str]:
-    """Get the OpenAI API key from Streamlit session state, environment variables, or Streamlit secrets."""
+    """Get the OpenAI API key from environment variables or Streamlit secrets only (no in-browser input)."""
     api_key = None
-    
-    # 1. Try to get API key from Streamlit session state (for in-browser input)
-    if "openai_api_key_input" in st.session_state and st.session_state.openai_api_key_input:
-        api_key = st.session_state.openai_api_key_input
-        logger.info("API key found in Streamlit session state (in-browser input).")
-    # 2. Try to get API key from Streamlit secrets
-    elif "OPENAI_API_KEY" in st.secrets:
+    # 1. Try to get API key from Streamlit secrets
+    if "OPENAI_API_KEY" in st.secrets:
         api_key = st.secrets["OPENAI_API_KEY"]
         logger.info("API key found in Streamlit secrets.")
-    # 3. Try to get API key from environment variables
+    # 2. Try to get API key from environment variables
     elif "OPENAI_API_KEY" in os.environ:
         api_key = os.environ.get("OPENAI_API_KEY")
         logger.info("API key found in environment variables.")
     else:
-        logger.warning("OPENAI_API_KEY not found in Streamlit session state, secrets, or environment variables.")
-    
+        logger.warning("OPENAI_API_KEY not found in Streamlit secrets or environment variables.")
     if not validate_api_key(api_key):
         logger.warning("Invalid OpenAI API key format.")
         return None
-    
     return api_key
 
 def show_api_key_guidance():
@@ -719,26 +715,11 @@ def handle_upload_tab():
     st.header("Upload Transcript")
     st.write("Upload your transcript file (TXT, DOCX, or PDF) to start the analysis.")
 
-    # Input for OpenAI API Key (new)
-    current_api_key_in_session = st.session_state.get("openai_api_key_input", "")
-    initial_api_key_from_sources = get_api_key()
-
-    # If an API key is already valid from other sources, use that as the initial value
-    # Otherwise, use what's in session state (if user typed something previously)
-    # This ensures user's typed input takes precedence if it exists
-    display_value = current_api_key_in_session if current_api_key_in_session else (initial_api_key_from_sources or "")
-
-    st.session_state.openai_api_key_input = st.text_input(
-        "OpenAI API Key",
-        type="password",
-        value=display_value,
-        help="Enter your OpenAI API key. It will not be stored permanently."
-    )
-
-    # After user input, check if a valid API key is now available
-    valid_api_key_exists = get_api_key() # This will now prioritize session state input
+    # Remove in-browser API key input
+    valid_api_key_exists = get_api_key()
 
     if not valid_api_key_exists:
+        st.error("No valid OpenAI API key found. Please set the OPENAI_API_KEY environment variable or add it to .streamlit/secrets.toml.")
         show_api_key_guidance()
     else:
         st.success("OpenAI API key configured successfully!")
@@ -747,12 +728,22 @@ def handle_upload_tab():
     if uploaded_file is not None:
         process_transcript(uploaded_file)
 
+    # Analysis type selection (after transcript upload)
+    st.session_state.analysis_type = st.selectbox(
+        "Select Analysis Type",
+        ["Inductive", "Deductive", "Both"],
+        index=0,
+        help="Choose the type of qualitative analysis to perform."
+    )
+
     # Research Question input
     st.session_state.research_question = st.text_area(
         "Enter your Research Question",
         value=st.session_state.get("research_question", ""),
         help="This question will guide the AI's analysis of your transcript."
     )
+
+# ...existing code...
 
 @handle_errors
 def handle_analysis_tab():
@@ -791,80 +782,66 @@ def handle_analysis_tab():
             logger.info(f"Analysis task started, current_task set to {task_id}")
             st.rerun() # Force rerun to show progress immediately
     
-    # Show progress for current task
-    if "current_task" in st.session_state:
-        task_id = st.session_state.current_task
-        progress = st.session_state.get(f"progress_{task_id}", 0.0)
-        status = st.session_state.get(f"status_{task_id}", "Starting analysis...")
-        analysis_complete = st.session_state.get("analysis_complete", False)
-        
-        # Retrieve the progress queue
-        progress_queue = task_manager.get_progress_queue(task_id)
-        if progress_queue:
-            # Check if there are any new messages in the queue
-            queue_had_messages = False
-            while not progress_queue.empty():
-                queue_had_messages = True
-                try:
-                    message_type, *data = progress_queue.get_nowait()
-                    if message_type == "progress":
-                        progress_val, status_msg = data
-                        st.session_state[f"progress_{task_id}"] = progress_val
-                        st.session_state[f"status_{task_id}"] = status_msg
-                        progress = progress_val # Update local variable for current render cycle
-                        status = status_msg
-                    elif message_type == "complete_data":
-                        analysis_results = data[0]
-                        st.session_state.analysis_results = analysis_results
-                        st.session_state.analysis_complete = True
-                        st.session_state[f"status_{task_id}"] = "Analysis complete!"
-                        analysis_complete = True # Update local variable
-                    elif message_type == "error":
-                        error_msg = data[0]
-                        st.session_state[f"status_{task_id}"] = f"Error: {error_msg}"
-                        st.session_state.analysis_complete = True
-                        analysis_complete = True # Update local variable
-                except Exception as e:
-                    logger.error(f"Error processing queue message for task {task_id}: {e}", exc_info=True)
-                    # Don't re-raise, allow the app to continue
+    # Button for creating codes (Stage 1) after research question input
+    if st.button("Create Codes (Stage 1)", type="primary"):
+        logger.info("Create Codes button clicked.")
+        st.session_state.analysis_results = None
+        st.session_state.analysis_complete = False
+        analysis_type = st.session_state.get("analysis_type", "Inductive")
+        task_id = start_analysis_task(
+            st.session_state.transcript_text,
+            st.session_state.research_question,
+            analysis_type,
+            st.session_state.framework
+        )
+        st.session_state.current_task = task_id
+        logger.info(f"Code creation task started, current_task set to {task_id}")
+        st.rerun()  # Force rerun to show progress immediately
 
-            # Update the progress bar and status text again after processing queue
-            progress_bar = st.progress(progress)
-            status_text = st.empty()
-
-            progress_bar.progress(progress)
-            status_text.text(status)
-
-            if analysis_complete:
-                logger.info(f"Task {task_id} detected as complete in UI. Results: {st.session_state.get('analysis_results') is not None}")
-                progress_bar.empty() # Clear progress bar
-                status_text.empty() # Clear status text
-                
-                if st.session_state.get("analysis_results"):
-                    status_box.update(label="Analysis complete!", state="complete", expanded=False)
-                    display_analysis_results(st.session_state.analysis_results)
-                elif status.startswith("Error"):
-                    status_box.update(label=f"Analysis failed: {status}", state="error", expanded=True)
+    # Show codes by respondent (Stage 1)
+    if "analysis_results" in st.session_state and st.session_state.analysis_results:
+        analysis_results = st.session_state.analysis_results
+        codes_by_respondent = analysis_results.get("codes_by_respondent", {})
+        if codes_by_respondent:
+            st.subheader("Stage 1: Codes by Respondent")
+            for respondent, codes in codes_by_respondent.items():
+                st.markdown(f"**{respondent}**")
+                if codes:
+                    df = pd.DataFrame(codes)
+                    display_cols = [col for col in df.columns if col in ["code", "text"]]
+                    if display_cols:
+                        st.dataframe(df[display_cols])
+                    else:
+                        st.dataframe(df)
                 else:
-                    status_box.update(label="Analysis completed with no results or unexpected state.", state="complete", expanded=False)
+                    st.info(f"No codes identified for {respondent}.")
 
-                # Clean up task and session state for the next run
-                task_manager.cleanup(task_id)
-                st.session_state.active_tasks.discard(task_id)
-                if "current_task" in st.session_state:
-                    del st.session_state.current_task
-                st.session_state.analysis_complete = False # Reset for next run
-                st.session_state.analysis_results = None   # Reset for new analysis
-                logger.info(f"Task {task_id} UI elements cleaned up.")
+        # Button for creating themes (Stage 2)
+        if st.button("Create Themes (Stage 2)", type="primary"):
+            logger.info("Create Themes button clicked.")
+            # Add a 'theme' column to each respondent's codes (simulate theme creation)
+            for respondent, codes in codes_by_respondent.items():
+                for code in codes:
+                    code["theme"] = code.get("theme", "Theme Placeholder")
+            st.session_state.themes_created = True
+            st.success("Themes created and added to codes.")
+            st.rerun()
 
-            elif not analysis_complete:
-                # If the task is not complete and the queue is empty, wait a bit and rerun
-                # This prevents excessive reruns when no new data is available
-                if not queue_had_messages and not task_manager.is_complete(task_id):
-                    time.sleep(0.5) # Increased delay to prevent excessive reruns
-                
-                logger.info(f"Task {task_id} not yet complete. Forcing rerun.")
-                st.rerun()
+        # Show codes with themes if created
+        if st.session_state.get("themes_created"):
+            st.subheader("Stage 2: Codes with Themes by Respondent")
+            for respondent, codes in codes_by_respondent.items():
+                st.markdown(f"**{respondent}**")
+                if codes:
+                    df = pd.DataFrame(codes)
+                    display_cols = [col for col in df.columns if col in ["code", "text", "theme"]]
+                    if display_cols:
+                        st.dataframe(df[display_cols])
+                    else:
+                        st.dataframe(df)
+                else:
+                    st.info(f"No codes identified for {respondent}.")
+    # ...existing code...
 
 @handle_errors
 def handle_results_tab():
@@ -923,6 +900,40 @@ def handle_results_tab():
         if segment_themes:
             fig = create_theme_distribution_chart(segment_themes)
             st.plotly_chart(fig, use_container_width=True)
+
+    # Show codes by respondent (Stage 1)
+    codes_by_respondent = analysis_results.get("codes_by_respondent", {})
+    if codes_by_respondent:
+        st.subheader("Stage 1: Codes by Respondent")
+        for respondent, codes in codes_by_respondent.items():
+            st.markdown(f"**{respondent}**")
+            if codes:
+                df = pd.DataFrame(codes)
+                # Only show columns for code and transcript
+                display_cols = [col for col in df.columns if col in ["code", "text"]]
+                if display_cols:
+                    st.dataframe(df[display_cols])
+                else:
+                    st.dataframe(df)
+            else:
+                st.info(f"No codes identified for {respondent}.")
+    else:
+        st.info("No codes by respondent available.")
+
+    # Show codes with themes if created
+    if st.session_state.get("themes_created"):
+        st.subheader("Stage 2: Codes with Themes by Respondent")
+        for respondent, codes in codes_by_respondent.items():
+            st.markdown(f"**{respondent}**")
+            if codes:
+                df = pd.DataFrame(codes)
+                display_cols = [col for col in df.columns if col in ["code", "text", "theme"]]
+                if display_cols:
+                    st.dataframe(df[display_cols])
+                else:
+                    st.dataframe(df)
+            else:
+                st.info(f"No codes identified for {respondent}.")
 
 def display_analysis_results(analysis_results: Dict):
     """Helper function to display analysis results from handle_analysis_tab."""
@@ -1136,65 +1147,45 @@ def load_framework(file) -> Dict:
         raise FileProcessingError(f"Error loading framework: {e}")
 
 def ai_generate_codes(text: str, mode: str, rq: str, framework: Optional[str] = None) -> List[dict]:
-    """Simulate AI generating codes for a text segment."""
-    logger.info(f"ai_generate_codes called with mode: {mode}, text length: {len(text)}")
-    # This is a placeholder. Replace with actual AI call.
-    # For demonstration, generate random themes and codes
-    possible_themes = list(THEME_COLORS.keys())
-    
-    # Dummy AI response structure
-    if mode == "Thematic Analysis":
-        response_structure = {
-            "coded_segments": [
-                {
-                    "text": text,
-                    "code": f"Code {random.randint(1, 5)}",
-                    "theme": random.choice(possible_themes),
-                    "notes": "AI generated note."
-                }
-            ]
-        }
-    elif mode == "Grounded Theory":
-         response_structure = {
-            "coded_segments": [
-                {
-                    "text": text,
-                    "code": f"InVivoCode {random.randint(1, 3)}",
-                    "theme": "Emergent Theme",
-                    "notes": "Grounded theory initial coding."
-                }
-            ]
-        }
-    elif mode == "Framework Analysis":
-        if not framework or "themes" not in framework:
-            raise ValidationError("Framework is required for Framework Analysis.")
-        
-        framework_themes = [t["name"] for t in framework["themes"]]
-        response_structure = {
-            "coded_segments": [
-                {
-                    "text": text,
-                    "code": f"FrameworkCode {random.randint(1, 3)}",
-                    "theme": random.choice(framework_themes), # Select from framework themes
-                    "notes": "Framework analysis applied."
-                }
-            ]
-        }
-    else:
-        raise ValidationError(f"Unknown analysis mode: {mode}")
+    """Call OpenAI API to generate codes for a text segment."""
+    logger.info(f"ai_generate_codes called with mode: {mode}, text length: {len(text)})")
+    api_key = get_api_key()
+    if not api_key:
+        raise Exception("No valid OpenAI API key found. Please provide your API key in the sidebar/input.")
 
-    # Simulate API call delay
-    time.sleep(0.5) 
+    system_prompt = "You are a qualitative coding assistant. Given a research question and a text segment, return a JSON with a list of coded_segments, each with 'text', 'code', 'theme', and 'notes'."
+    user_prompt = f"Research Question: {rq}\nAnalysis Mode: {mode}\nText: {text}"
+    if mode == "Framework Analysis" and framework and isinstance(framework, dict):
+        user_prompt += f"\nFramework Themes: {[t['name'] for t in framework.get('themes', [])]}"
 
-    # Validate the dummy response against a simplified schema for safety
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.2,
+        "max_tokens": 512
+    }
+    response = requests.post(API_URL, headers=headers, json=data)
+    if response.status_code != 200:
+        logger.error(f"OpenAI API error: {response.status_code} {response.text}")
+        raise Exception(f"OpenAI API error: {response.status_code} {response.text}")
+    result = response.json()
     try:
-        validated_response = validate_ai_response(response_structure, {"coded_segments": list})
-        # Further validate each segment within coded_segments if needed
+        content = result["choices"][0]["message"]["content"]
+        # Try to parse the content as JSON
+        response_json = json.loads(content)
+        validated_response = validate_ai_response(response_json, {"coded_segments": list})
         logger.info(f"ai_generate_codes completed for mode: {mode}")
         return validated_response["coded_segments"]
-    except AIResponseError as e:
-        logger.error(f"AI response validation failed: {e.message}")
-        raise # Re-raise for error handling decorator
+    except Exception as e:
+        logger.error(f"Failed to parse OpenAI response: {e}\nRaw content: {content}")
+        raise Exception(f"Failed to parse OpenAI response: {e}\nRaw content: {content}")
 
 @cache_result(ttl=CACHE_TTL)
 def analyze_transcript(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> Dict:
@@ -1249,41 +1240,60 @@ async def process_chunk_async(chunk: str, research_question: str, analysis_mode:
     return {"coded_segments": coded_segments}
 
 async def process_transcript_async(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> AsyncGenerator[Tuple[float, Dict], None]:
-    """Process the transcript asynchronously with progress updates."""
+    """
+    Stage 1: Identify codes from transcript chunks grouped by respondent names.
+    Stage 2: Identify themes based on the codes developed.
+    """
     logger.info(f"process_transcript_async started for transcript length: {len(transcript_text)}")
-    chunks = chunk_text(transcript_text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
-    total_chunks = len(chunks)
+    respondent_sections = split_transcript_by_respondent(transcript_text)
+    total_respondents = len(respondent_sections)
+    all_codes_by_respondent = {}
     all_coded_segments = []
     all_themes = set()
-
-    for i, chunk in enumerate(chunks):
-        logger.info(f"Processing chunk {i+1}/{total_chunks} in process_transcript_async.")
-        try:
-            chunk_result = await process_chunk_async(chunk, research_question, analysis_mode, framework)
-            coded_segments_for_chunk = chunk_result.get("coded_segments", [])
-            all_coded_segments.extend(coded_segments_for_chunk)
-            for segment in coded_segments_for_chunk:
-                if "theme" in segment:
-                    all_themes.add(segment["theme"])
-            
-            progress = (i + 1) / total_chunks
-            status = f"Analyzing chunk {i+1}/{total_chunks}..."
-            logger.info(f"Yielding progress: {progress:.2f}, status: {status}")
+    errors = []
+    progress_counter = 0
+    total_chunks = sum(len(chunk_text(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)) for text in respondent_sections.values())
+    if total_chunks == 0:
+        yield 1.0, {"status": "No valid respondent sections or chunks found.", "type": "error"}
+        return
+    # Stage 1: Codes by respondent
+    for respondent, text in respondent_sections.items():
+        respondent_codes = []
+        chunks = chunk_text(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
+        for i, chunk in enumerate(chunks):
+            try:
+                chunk_result = await process_chunk_async(chunk, research_question, analysis_mode, framework)
+                coded_segments_for_chunk = chunk_result.get("coded_segments", [])
+                for segment in coded_segments_for_chunk:
+                    segment["respondent"] = respondent
+                respondent_codes.extend(coded_segments_for_chunk)
+                all_coded_segments.extend(coded_segments_for_chunk)
+            except Exception as e:
+                error_msg = f"Error processing chunk {i+1} for respondent {respondent}: {e}"
+                logger.error(error_msg, exc_info=True)
+                errors.append(error_msg)
+            progress_counter += 1
+            progress = progress_counter / total_chunks
+            status = f"Coding: {respondent} chunk {i+1}/{len(chunks)} ({progress_counter}/{total_chunks})"
             yield progress, {"status": status, "type": "progress"}
-        except Exception as e:
-            logger.error(f"Error processing chunk {i+1}: {e}", exc_info=True)
-            yield -1.0, {"status": f"Error processing chunk {i+1}: {e}", "type": "error"}
-            return # Stop processing on error
-
+        all_codes_by_respondent[respondent] = respondent_codes
+    # Stage 2: Identify themes from all codes
+    # (Assume each coded segment has a 'theme' field)
+    for segment in all_coded_segments:
+        if "theme" in segment:
+            all_themes.add(segment["theme"])
     merged_segments = merge_coded_chunks(all_coded_segments)
-    summary = f"Analysis complete for research question: '{research_question}'. Identified {len(all_themes)} themes and {len(merged_segments)} coded segments."
-
+    summary = f"Stage 1: Codes identified for {total_respondents} respondents. Stage 2: Identified {len(all_themes)} themes from {len(merged_segments)} coded segments."
+    if errors:
+        summary += f" Encountered {len(errors)} errors. See 'errors' in results."
     final_results = {
         "summary": summary,
         "themes": sorted(list(all_themes)),
-        "coded_segments": merged_segments
+        "coded_segments": merged_segments,
+        "codes_by_respondent": all_codes_by_respondent,
+        "errors": errors
     }
-    logger.info(f"process_transcript_async completed. Final results: {final_results["summary"]}")
+    logger.info(f"process_transcript_async completed. Final results: {final_results['summary']}")
     yield 1.0, {"status": "Analysis complete!", "type": "complete", "results": final_results}
 
 def start_analysis_task(transcript_text: str, research_question: str, analysis_mode: str, framework: Optional[Dict] = None) -> str:
@@ -1321,3 +1331,27 @@ def start_analysis_task(transcript_text: str, research_question: str, analysis_m
 # Run the main application function
 if __name__ == "__main__":
     main()
+
+import re
+
+def split_transcript_by_respondent(transcript: str) -> dict:
+    """Split transcript into sections by respondent name. Returns a dict {respondent: text}."""
+    respondent_sections = {}
+    current_respondent = None
+    current_text = []
+    # Regex to match lines like 'Respondent1:' or 'John Doe:'
+    respondent_pattern = re.compile(r'^(\w[\w\s\-]*)\s*:', re.MULTILINE)
+    lines = transcript.splitlines()
+    for line in lines:
+        match = respondent_pattern.match(line)
+        if match:
+            if current_respondent and current_text:
+                respondent_sections[current_respondent] = '\n'.join(current_text).strip()
+            current_respondent = match.group(1).strip()
+            current_text = [line[len(match.group(0)):].strip()]
+        else:
+            if current_respondent:
+                current_text.append(line.strip())
+    if current_respondent and current_text:
+        respondent_sections[current_respondent] = '\n'.join(current_text).strip()
+    return respondent_sections

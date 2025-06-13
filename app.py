@@ -281,8 +281,8 @@ OVERLAP = 50  # words
 CHUNK_READ_SIZE = 8192 # Bytes for file streaming
 
 # OpenRouter API configuration
-API_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "openai/gpt-4o" # Default model
+API_URL = "https://api.openai.com/v1/chat/completions"
+MODEL = "gpt-4o"  # Default model
 
 # Theme colors for highlighting
 THEME_COLORS = {
@@ -313,23 +313,29 @@ def show_error_page(error: Exception):
 def validate_api_key(api_key: str) -> bool:
     """Validate the format of the provided API key."""
     # Basic validation: check if it's a non-empty string and starts with 'sk-'
-    return isinstance(api_key, str) and api_key.strip() != "" # and api_key.startswith("sk-") # OpenRouter keys don't necessarily start with sk-"
+    return isinstance(api_key, str) and api_key.strip() != "" and api_key.startswith("sk-")
 
 def get_api_key() -> Optional[str]:
     """Retrieve the API key from Streamlit secrets or environment variables."""
     api_key = None
     try:
         # Attempt to retrieve from Streamlit secrets
-        if "OPENROUTER_API_KEY" in st.secrets:
-            api_key = st.secrets["OPENROUTER_API_KEY"]
+        if "OPENAI_API_KEY" in st.secrets:
+            api_key = st.secrets["OPENAI_API_KEY"]
             logger.info("API key found in Streamlit secrets.")
+        elif "OPENAI_API_KEY" in os.environ:
+            api_key = os.environ.get("OPENAI_API_KEY")
+            logger.info("API key found in environment variables.")
+        elif "OPENROUTER_API_KEY" in st.secrets:
+            api_key = st.secrets["OPENROUTER_API_KEY"]
+            logger.info("OpenRouter API key found in Streamlit secrets (for backward compatibility).")
         elif "OPENROUTER_API_KEY" in os.environ:
             api_key = os.environ.get("OPENROUTER_API_KEY")
-            logger.info("API key found in environment variables.")
+            logger.info("OpenRouter API key found in environment variables (for backward compatibility).")
         else:
-            logger.warning("OPENROUTER_API_KEY not found in Streamlit secrets or environment variables.")
+            logger.warning("Neither OPENAI_API_KEY nor OPENROUTER_API_KEY found in Streamlit secrets or environment variables.")
             return None
-        
+
         if not validate_api_key(api_key):
             logger.error("Retrieved API key is invalid.")
             return None
@@ -341,30 +347,30 @@ def get_api_key() -> Optional[str]:
     return api_key
 
 def show_api_key_guidance():
-    st.warning("OpenRouter API Key Not Configured")
+    st.warning("API Key Not Configured")
     st.markdown("""
-    To use this application, you need to provide your OpenRouter API key. 
+    To use this application, you need to provide your OpenAI API key. 
     Please configure it using one of the following methods:
 
     1.  **Streamlit Secrets (Recommended for Deployment):**
         Create a `.streamlit/secrets.toml` file in your project root with the following content:
         ```toml
-        OPENROUTER_API_KEY="your_openrouter_api_key_here"
+        OPENAI_API_KEY="your_openai_api_key_here"
         ```
         **Note:** Do not commit `secrets.toml` to public GitHub repositories.
 
     2.  **Environment Variable (Recommended for Local Development):**
-        Set the `OPENROUTER_API_KEY` environment variable before running the app:
+        Set the `OPENAI_API_KEY` environment variable before running the app:
         ```bash
-        export OPENROUTER_API_KEY="your_openrouter_api_key_here"
+        export OPENAI_API_KEY="your_openai_api_key_here"
         streamlit run app.py
         ```
         On Windows (Command Prompt):
         ```cmd
-        set OPENROUTER_API_KEY="your_openrouter_api_key_here"
+        set OPENAI_API_KEY="your_openai_api_key_here"
         streamlit run app.py
         ```
-    You can obtain your OpenRouter API key from the [OpenRouter website](https://openrouter.ai/keys).
+    You can obtain your OpenAI API key from the [OpenAI website](https://platform.openai.com/account/api-keys).
     """)
 
 @cache_result(ttl=CACHE_TTL)
@@ -550,7 +556,7 @@ async def get_ai_response_async(messages: List[Dict], stream: bool = True) -> As
     """Get streaming AI response from OpenRouter API."""
     api_key = get_api_key()
     if not api_key:
-        raise ValidationError("OpenRouter API key is missing or invalid. Please configure it.")
+        raise ValidationError("API key is missing or invalid. Please configure it.")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -611,17 +617,10 @@ async def get_ai_response_async(messages: List[Dict], stream: bool = True) -> As
         raise AIResponseError(f"An unexpected error occurred during API call: {e}", traceback.format_exc())
 
 def get_ai_response(messages: List[Dict], stream: bool = True):
-    """Synchronous wrapper for AI response (for non-streaming or compatibility)."""
-    # This function is now a placeholder as primary AI calls are async.
-    # For synchronous use, you'd run the async generator to completion.
-    full_response_content = ""
-    try:
-        for chunk in asyncio.run(get_ai_response_async(messages, stream=stream)):
-            full_response_content += chunk
-        return full_response_content
-    except Exception as e:
-        st.error(f"Error in get_ai_response: {e}")
-        return ""
+    """Synchronous wrapper for asynchronous AI response retrieval."""
+    logger.info(f"API Key status before async call: {bool(get_api_key())}")
+    for chunk in asyncio.run(get_ai_response_async(messages, stream=stream)):
+        yield chunk
 
 @handle_errors
 def process_transcript(uploaded_file) -> Optional[List[str]]:
